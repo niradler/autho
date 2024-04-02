@@ -1,10 +1,10 @@
 import crypto from "crypto";
 
+const algorithm = "aes-256-ctr";
+const IV_LENGTH = 16;
+
 export default class Cipher {
-  constructor(config) {
-    this.config = config;
-    this.salt = config.get("salt", "");
-  }
+  constructor() { }
 
   static hash(text) {
     const hash = crypto.createHash("sha256");
@@ -13,38 +13,42 @@ export default class Cipher {
     return hash.digest("hex");
   }
 
-  static random() {
-    const rnd = crypto.randomBytes(16).toString("hex");
+  static random(size = IV_LENGTH) {
+    const rnd = crypto.randomBytes(size);
 
     return rnd;
   }
 
-  static createKey(salt="") {
-    const rnd = Cipher.random(salt)
+  static randomString() {
+    const rnd = Cipher.random().toString("hex");
 
-    return Cipher.hash(salt+rnd);
+    return rnd;
   }
 
-  encrypt(text, password) {
-    const publicKey = Cipher.createKey(this.salt);
-    const cipher = crypto.createCipher(
-      "aes-256-cbc",
-       publicKey + password
+  static encrypt(text, password) {
+    const publicKey = Cipher.randomString();
+    let cipher = crypto.createCipheriv(
+      algorithm,
+      Buffer.from(password, "hex"),
+      Buffer.from(publicKey, "hex"),
     );
-    let encrypted = cipher.update(text, "utf8", "hex");
-    encrypted += cipher.final("hex");
+    let encrypted = cipher.update(text);
+    encrypted = Buffer.concat([encrypted, cipher.final()]);
+    encrypted = encrypted.toString("hex");
 
     return { publicKey, encrypted };
   }
 
-  decrypt(encryptedText, publicKey, password) {
-    const decipher = crypto.createDecipher(
-      "aes-256-cbc",
-      publicKey + password
+  static decrypt(encryptedText, publicKey, password) {
+    encryptedText = Buffer.from(encryptedText, "hex");
+    let decipher = crypto.createDecipheriv(
+      algorithm,
+      Buffer.from(password, "hex"),
+      Buffer.from(publicKey, "hex")
     );
-    let decrypted = decipher.update(encryptedText, "hex", "utf8");
-    decrypted += decipher.final("utf8");
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
 
-    return decrypted;
+    return decrypted.toString();
   }
 }
