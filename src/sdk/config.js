@@ -1,9 +1,11 @@
 import Conf from "conf";
 
+const { AUTHO_ENCRYPTION_KEY = "", AUTHO_NAME = 'default' } = process.env;
+
 export default class Config {
     constructor({
-        encryptionKey,
-        configName='default'
+        encryptionKey = AUTHO_ENCRYPTION_KEY,
+        configName = AUTHO_NAME
     }) {
         this.config = new Conf({ projectName: "autho", encryptionKey, configName });
     }

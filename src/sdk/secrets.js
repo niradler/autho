@@ -4,7 +4,6 @@ import Cipher from "./cipher.js";
 export default class Secrets {
   constructor(config) {
     this.config = config;
-    this.cipher = new Cipher(config);
   }
 
   get secrets() {
@@ -25,7 +24,7 @@ export default class Secrets {
       throw new Error(error);
     }
 
-    const { publicKey, encrypted } = this.cipher.encrypt(value.value, password);
+    const { publicKey, encrypted } = Cipher.encrypt(value.value, password);
     value.value = encrypted;
     value.publicKey = publicKey;
 
@@ -34,5 +33,9 @@ export default class Secrets {
 
   async remove(id) {
     this.secrets = this.secrets.filter((secret) => secret.id != id);
+  }
+
+  async clear() {
+    this.secrets = [];
   }
 }

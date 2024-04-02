@@ -13,9 +13,14 @@ const program = new Command();
 
 const getSecret = async (config) => {
   const existingSecrets = config.get("secrets", []);
+
+  if (existingSecrets.length === 0) {
+    throw new Error("No secrets found");
+  }
+
   const choices = existingSecrets.map((secret) => ({
     value: secret.id,
-    name: secret.name,
+    name: `${secret.name} (${secret.typeOptions.username || secret.id})`,
   }));
 
   const { id: secretId } = await prompt({
@@ -25,7 +30,6 @@ const getSecret = async (config) => {
     choices,
     required: true,
   });
-
   const secrets = new Secrets(config);
   const secret = await secrets.get(secretId);
 
@@ -46,19 +50,13 @@ program
       const masterPassword = args.password
         ? args.password
         : await ask({
-            name: "masterPassword",
-            message: "Password:",
-            type: "password",
-            required: true,
-          });
+          name: "masterPassword",
+          message: "Password:",
+          type: "password",
+          required: true,
+        });
       const masterPasswordHash = Cipher.hash(masterPassword);
       const config = new Config({ encryptionKey: masterPasswordHash });
-      let salt = config.get();
-
-      if (!salt) {
-        salt = Cipher.random();
-        config.set("salt", salt);
-      }
 
       let choices = [
         { value: "create", name: "Create new secret" },
@@ -79,23 +77,33 @@ program
 
         case "read":
           const readSecret = await getSecret(config);
-    
-            switch (readSecret.type) {
-              case "otp":
-                const otp = new OTP(config, readSecret, masterPasswordHash);
-                console.log(otp.generate());
-                setTimeout(() => {
-                  console.log("Expired");
-                  process.exit(0);
-                }, 30000);
-                break;
-            }
-          
+          readSecret.value = Cipher.decrypt(readSecret.value, readSecret.publicKey, masterPasswordHash)
+
+          switch (readSecret.type) {
+            case "password":
+              console.log("Username:", readSecret.typeOptions.username);
+              console.log("Password:", readSecret.value);
+              break;
+            case "note":
+              console.log("Note:", readSecret.value);
+              break;
+            case "otp":
+              const otp = new OTP(readSecret);
+              console.log("OTP code:", otp.generate());
+              setTimeout(() => {
+                console.log("Expired");
+                process.exit(0);
+              }, 30000);
+              break;
+          }
+
           break;
         case "delete":
-            const deleteSecret = getSecret(config);
-            const secrets = new Secrets(config);
-            secrets.remove(deleteSecret.id)
+          const deleteSecret = await getSecret(config);
+          const secrets = new Secrets(config);
+          await secrets.remove(deleteSecret.id)
+          console.log("Removed");
+          process.exit(0);
           break;
       }
     } catch (error) {

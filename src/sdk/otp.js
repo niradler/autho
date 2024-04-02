@@ -1,16 +1,15 @@
 import * as OTPAuth from "otpauth";
-import Cipher from "./cipher.js";
 
 export default class OTP {
-  constructor(config, secret, password) {
-    const cipher = new Cipher(config);
+  constructor(secret) {
+
     const options = {
-      issuer: "ACME",
+      issuer: "Autho",
       label: secret.name,
       algorithm: "SHA1",
       digits: 6,
       period: 30,
-      secret: cipher.decrypt(secret.value, secret.publicKey, password),
+      secret: secret.value,
     };
 
     this.totp = new OTPAuth.TOTP(options);
