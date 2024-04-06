@@ -3,44 +3,21 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { prompt, ask } from "./utils.js";
-import DB from "../sdk/db.js";
+import App from "../app.js";
 import Cipher from "../sdk/cipher.js";
 import createSecret from "./wizards/createSecret.js";
 import getEncryptionKey from "./wizards/getEncryptionKey.js";
 import getSecret from "./wizards/getSecret.js";
-import Secrets from "../sdk/secrets.js";
 import OTP from "../sdk/otp.js";
 
 const program = new Command();
-
-//type AppOptions = {
-//   masterPasswordHash?: string;
-//   masterPassword?: string;
-//   appFolder?: string;
-// };
-
-class App {
-  constructor(options = {}) {
-    let masterPasswordHash =
-      options.masterPasswordHash || process.env.AUTHO_MASTER_PASSWORD_HASH;
-    const masterPassword = options.masterPassword || process.env.AUTHO_MASTER_PASSWORD;
-    if (!masterPasswordHash && !masterPassword) {
-      throw new Error("Master password or master password hash is required")
-    }
-    masterPasswordHash =
-      masterPasswordHash ||
-      Cipher.hash(masterPassword);
-    this.db = new DB({ encryptionKey: masterPasswordHash });
-    this.secrets = new Secrets(this);
-  }
-
-}
 
 program
   .name("autho")
   .description("Secrets manager")
   .version("0.0.1")
   .option("-p, --password <password>", "Master password")
+  .option("-d, --dataFolder <folderPath>", "Folder path to store secrets db")
   .action(async (args) => {
     try {
       const masterPassword = args.password
@@ -52,8 +29,8 @@ program
           required: true,
         });
 
-      const app = new App({ masterPassword });
-
+      const app = new App({ masterPassword, dataFolder: args.dataFolder });
+      console.log(app.db.store(), app.db.path())
       let choices = [
         { value: "create", name: "Create new secret" },
         { value: "read", name: "Read secret" },
@@ -78,13 +55,9 @@ program
           if (readSecret.protected) {
             encryptionKey = await getEncryptionKey()
           }
+          
+          readSecret.value = Cipher.decrypt({ ...readSecret, encryptionKey });
 
-          readSecret.value = Cipher.decrypt(
-            readSecret.value,
-            readSecret.publicKey,
-            encryptionKey,
-            readSecret.signature
-          );
           switch (readSecret.type) {
             case "password":
               console.log("Username:", readSecret.typeOptions.username);
@@ -109,7 +82,7 @@ program
           await app.secrets.remove(deleteSecret.id);
           console.log("Removed");
           process.exit(0);
-         default:
+        default:
           console.log("Unknown action:", action);
           process.exit(1);
       }

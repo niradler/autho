@@ -23,8 +23,8 @@ export default class Secrets {
     if (error) {
       throw new Error(error);
     }
-
-    const { encrypted, ...encryption } = Cipher.encrypt(value.value, encryptionKey);
+    console.log({ secret, value, error, encryptionKey })
+    const { encrypted, ...encryption } = Cipher.encrypt({ ...value, encryptionKey });
 
     this.secrets = [...this.secrets, { ...value, ...encryption, value: encrypted }];
   }
