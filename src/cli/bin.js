@@ -3,42 +3,38 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { prompt, ask } from "./utils.js";
-import Config from "../sdk/config.js";
+import DB from "../sdk/db.js";
 import Cipher from "../sdk/cipher.js";
 import createSecret from "./wizards/createSecret.js";
+import getEncryptionKey from "./wizards/getEncryptionKey.js";
+import getSecret from "./wizards/getSecret.js";
 import Secrets from "../sdk/secrets.js";
 import OTP from "../sdk/otp.js";
 
 const program = new Command();
 
-const getSecret = async (config) => {
-  const existingSecrets = config.get("secrets", []);
+//type AppOptions = {
+//   masterPasswordHash?: string;
+//   masterPassword?: string;
+//   appFolder?: string;
+// };
 
-  if (existingSecrets.length === 0) {
-    throw new Error("No secrets found");
+class App {
+  constructor(options = {}) {
+    let masterPasswordHash =
+      options.masterPasswordHash || process.env.AUTHO_MASTER_PASSWORD_HASH;
+    const masterPassword = options.masterPassword || process.env.AUTHO_MASTER_PASSWORD;
+    if (!masterPasswordHash && !masterPassword) {
+      throw new Error("Master password or master password hash is required")
+    }
+    masterPasswordHash =
+      masterPasswordHash ||
+      Cipher.hash(masterPassword);
+    this.db = new DB({ encryptionKey: masterPasswordHash });
+    this.secrets = new Secrets(this);
   }
 
-  const choices = existingSecrets.map((secret) => ({
-    value: secret.id,
-    name: `${secret.name} (${secret.typeOptions.username || secret.id})`,
-  }));
-
-  const { id: secretId } = await prompt({
-    name: "id",
-    message: "Secrets:",
-    type: "list",
-    choices,
-    required: true,
-  });
-  const secrets = new Secrets(config);
-  const secret = await secrets.get(secretId);
-
-  if (!secret) {
-    throw new Error("Secret not found");
-  }
-
-  return secret;
-};
+}
 
 program
   .name("autho")
@@ -55,8 +51,8 @@ program
           type: "password",
           required: true,
         });
-      const masterPasswordHash = Cipher.hash(masterPassword);
-      const config = new Config({ encryptionKey: masterPasswordHash });
+
+      const app = new App({ masterPassword });
 
       let choices = [
         { value: "create", name: "Create new secret" },
@@ -70,15 +66,25 @@ program
         choices,
         required: true,
       });
+
       switch (action) {
         case "create":
-          await createSecret(config, masterPasswordHash);
+          await createSecret(app);
           break;
 
         case "read":
-          const readSecret = await getSecret(config);
-          readSecret.value = Cipher.decrypt(readSecret.value, readSecret.publicKey, masterPasswordHash)
+          const readSecret = await getSecret(app);
+          let encryptionKey = app.db.encryptionKey
+          if (readSecret.protected) {
+            encryptionKey = await getEncryptionKey()
+          }
 
+          readSecret.value = Cipher.decrypt(
+            readSecret.value,
+            readSecret.publicKey,
+            encryptionKey,
+            readSecret.signature
+          );
           switch (readSecret.type) {
             case "password":
               console.log("Username:", readSecret.typeOptions.username);
@@ -99,12 +105,13 @@ program
 
           break;
         case "delete":
-          const deleteSecret = await getSecret(config);
-          const secrets = new Secrets(config);
-          await secrets.remove(deleteSecret.id)
+          const deleteSecret = await getSecret(app);
+          await app.secrets.remove(deleteSecret.id);
           console.log("Removed");
           process.exit(0);
-          break;
+         default:
+          console.log("Unknown action:", action);
+          process.exit(1);
       }
     } catch (error) {
       console.log(
