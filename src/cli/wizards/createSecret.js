@@ -1,7 +1,8 @@
 import { prompt } from "../utils.js";
-import Secrets from "../../sdk/secrets.js";
+import getEncryptionKey from "./getEncryptionKey.js";
 
-const wizard = async (config, masterPasswordHash) => {
+const wizard = async (app) => {
+  const secrets = app.secrets;
   const info = await prompt([
     {
       name: "name",
@@ -16,10 +17,22 @@ const wizard = async (config, masterPasswordHash) => {
       default: "password",
       choices: ["password", "otp", "note"],
       required: true,
+    },
+    {
+      name: "protected",
+      message: "protected:",
+      type: "confirm",
+      default: false,
+      required: true,
     }
   ]);
 
   let newSecret = {};
+  let encryptionKey = app.db.encryptionKey
+
+  if (info.protected) {
+    encryptionKey = await getEncryptionKey(true)
+  }
 
   switch (info.type) {
     case "password":
@@ -38,8 +51,7 @@ const wizard = async (config, masterPasswordHash) => {
         },
       ]);
       newSecret = {
-        name: info.name,
-        type: info.type,
+        ...info,
         value: password.value,
         typeOptions: {
           username: password.username,
@@ -56,8 +68,7 @@ const wizard = async (config, masterPasswordHash) => {
         },
       ]);
       newSecret = {
-        name: info.name,
-        type: info.type,
+        ...info,
         value: note.value,
         typeOptions: {
 
@@ -80,8 +91,7 @@ const wizard = async (config, masterPasswordHash) => {
         },
       ]);
       newSecret = {
-        name: info.name,
-        type: info.type,
+        ...info,
         value: otp.value,
         typeOptions: {
           username: otp.username,
@@ -90,8 +100,7 @@ const wizard = async (config, masterPasswordHash) => {
       break;
   }
 
-  const secrets = new Secrets(config);
-  await secrets.add(newSecret, masterPasswordHash);
+  await secrets.add(newSecret, encryptionKey);
 };
 
 export default wizard;

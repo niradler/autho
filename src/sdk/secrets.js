@@ -1,34 +1,32 @@
 import { createSecretSchema } from "../models/Secret.js";
-import Cipher from "./cipher.js";
+import Cipher from "../sdk/cipher.js";
 
 export default class Secrets {
-  constructor(config) {
-    this.config = config;
+  constructor(app) {
+    this.db = app.db;
   }
 
   get secrets() {
-    return this.config.get("secrets", []);
+    return this.db.get("secrets", []);
   }
 
   set secrets(value) {
-    this.config.set("secrets", value);
+    this.db.set("secrets", value);
   }
 
   async get(id) {
     return this.secrets.find((secret) => secret.id == id);
   }
 
-  async add(secret, password) {
+  async add(secret, encryptionKey) {
     const { value, error } = createSecretSchema.validate(secret);
     if (error) {
       throw new Error(error);
     }
 
-    const { publicKey, encrypted } = Cipher.encrypt(value.value, password);
-    value.value = encrypted;
-    value.publicKey = publicKey;
+    const { encrypted, ...encryption } = Cipher.encrypt(value.value, encryptionKey);
 
-    this.secrets = [...this.secrets, value];
+    this.secrets = [...this.secrets, { ...value, ...encryption, value: encrypted }];
   }
 
   async remove(id) {

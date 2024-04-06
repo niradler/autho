@@ -1,19 +1,15 @@
 import crypto from "crypto";
 
-const algorithm = "aes-256-ctr";
-const IV_LENGTH = 16;
-
 export default class Cipher {
-  constructor() { }
 
-  static hash(text) {
-    const hash = crypto.createHash("sha256");
+  static hash(text, algorithm = "sha256") {
+    const hash = crypto.createHash(algorithm);
     hash.update(text);
 
     return hash.digest("hex");
   }
 
-  static random(size = IV_LENGTH) {
+  static random(size = 16) {
     const rnd = crypto.randomBytes(size);
 
     return rnd;
@@ -25,30 +21,50 @@ export default class Cipher {
     return rnd;
   }
 
-  static encrypt(text, password) {
+  static sign(text) {
+    const hash = Cipher.hash(text)
+    const signature = `${hash.substring(0, 10)}:${hash.substring(hash.length - 10)}`;
+
+    return signature;
+  }
+
+  static verify(text, signature) {
+    const expectedSignature = Cipher.sign(text)
+
+    return expectedSignature === signature;
+  }
+
+  static encrypt(text, encryptionKey, algorithm = "aes-256-ctr") {
     const publicKey = Cipher.randomString();
     let cipher = crypto.createCipheriv(
       algorithm,
-      Buffer.from(password, "hex"),
+      Buffer.from(encryptionKey, "hex"),
       Buffer.from(publicKey, "hex"),
     );
     let encrypted = cipher.update(text);
     encrypted = Buffer.concat([encrypted, cipher.final()]);
     encrypted = encrypted.toString("hex");
 
-    return { publicKey, encrypted };
+    return { publicKey, encrypted, algorithm, signature: Cipher.sign(text) };
   }
 
-  static decrypt(encryptedText, publicKey, password) {
+  static decrypt(encryptedText, publicKey, encryptionKey, signature, algorithm = "aes-256-ctr") {
     encryptedText = Buffer.from(encryptedText, "hex");
+
     let decipher = crypto.createDecipheriv(
       algorithm,
-      Buffer.from(password, "hex"),
+      Buffer.from(encryptionKey, "hex"),
       Buffer.from(publicKey, "hex")
     );
+
     let decrypted = decipher.update(encryptedText);
     decrypted = Buffer.concat([decrypted, decipher.final()]);
+    decrypted = decrypted.toString();
 
-    return decrypted.toString();
+    if (!Cipher.verify(decrypted, signature)) {
+      throw new Error("Invalid signature")
+    }
+
+    return decrypted;
   }
 }
