@@ -5,7 +5,6 @@ Autho is an open-source, self-hosted alternative to services like Authy, providi
 ## Features
 
 - **OTP Generation**: Autho allows users to generate One-Time Passwords (OTPs) for two-factor authentication (2FA) using industry-standard algorithms.
-  
 - **Password Management**: Autho provides a secure vault for users to store and manage their passwords, ensuring easy access and strong encryption.
 
 - **Self-Hosted**: Autho can be self-hosted, giving users complete control over their data and eliminating reliance on third-party services.
