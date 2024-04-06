@@ -1,6 +1,6 @@
 {
   "name": "autho",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "main": "build/bin.js",
   "type": "module",
   "bin": {
@@ -11,8 +11,9 @@
     "format:write": "prettier --write .",
     "lint": "eslint .",
     "lint:fix": "eslint --fix .",
-    "build":"esbuild src/cli/bin.js --bundle --platform=node --target=node18 --outdir=build",
-    "pkg": "pkg build/bin.js --output dist/autho --target node18-win-x64,node18-linux-x64,node18-macos-x64"
+    "build": "esbuild src/cli/bin.js --bundle --platform=node --target=node18 --outdir=build",
+    "pkg": "pkg build/bin.js --output dist/autho --target node18-win-x64,node18-linux-x64,node18-macos-x64",
+    "release": "gh release create v0.0.5 ./dist"
   },
   "keywords": [],
   "author": "",
@@ -47,7 +48,7 @@
       "node18-win-x64",
       "node18-linux-arm64",
       "node18-linux-x64",
-      "node18-macos-x64"      
+      "node18-macos-x64"
     ],
     "outputPath": "dist"
   }
