@@ -1,12 +1,11 @@
-import * as OTPAuth from "otpauth";
+import * as OTPAuth from 'otpauth';
 
 export default class OTP {
   constructor(secret) {
-
     const options = {
-      issuer: "Autho",
+      issuer: 'Autho',
       label: secret.name,
-      algorithm: "SHA1",
+      algorithm: 'SHA1',
       digits: 6,
       period: 30,
       secret: secret.value,

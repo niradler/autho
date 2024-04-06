@@ -1,17 +1,17 @@
-import { createSecretSchema } from "../models/Secret.js";
-import Cipher from "../sdk/cipher.js";
+import { createSecretSchema } from '../models/Secret.js';
+import Cipher from '../sdk/cipher.js';
 
 export default class Secrets {
-  constructor(app) {
-    this.db = app.db;
+  constructor(db) {
+    this.db = db;
   }
 
   get secrets() {
-    return this.db.get("secrets", []);
+    return this.db.get('secrets', []);
   }
 
   set secrets(value) {
-    this.db.set("secrets", value);
+    this.db.set('secrets', value);
   }
 
   async get(id) {
@@ -23,10 +23,16 @@ export default class Secrets {
     if (error) {
       throw new Error(error);
     }
-    console.log({ secret, value, error, encryptionKey })
-    const { encrypted, ...encryption } = Cipher.encrypt({ ...value, encryptionKey });
 
-    this.secrets = [...this.secrets, { ...value, ...encryption, value: encrypted }];
+    const { encrypted, ...encryption } = Cipher.encrypt({
+      ...value,
+      encryptionKey,
+    });
+
+    this.secrets = [
+      ...this.secrets,
+      { ...value, ...encryption, value: encrypted },
+    ];
   }
 
   async remove(id) {
