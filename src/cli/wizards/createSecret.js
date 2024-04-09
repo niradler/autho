@@ -31,7 +31,7 @@ const wizard = async (app) => {
     },
   ]);
 
-  let newSecret = {};
+  let newSecret = { typeOptions: {} };
   let encryptionKey = app.db.encryptionKey;
 
   if (info.protected) {
