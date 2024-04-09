@@ -9,4 +9,5 @@ export default {
   encryptionALgo: process.env.AUTHO_ENCRYPTION_ALGO || 'aes-256-gcm',
   hashAlgo: process.env.AUTHO_HASH_ALGO || 'sha256',
   dataFolder: process.env.AUTHO_DATA_FOLDER,
+  name: process.env.AUTHO_COLLECTION_NAME || 'default',
 };
