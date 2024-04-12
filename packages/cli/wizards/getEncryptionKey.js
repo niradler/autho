@@ -1,4 +1,4 @@
-import Cipher from '../../sdk/cipher.js';
+import Cipher from 'sdk/cipher.js';
 import { prompt } from '../utils.js';
 
 const wizard = async (confirm = false) => {
