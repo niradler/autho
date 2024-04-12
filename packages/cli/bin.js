@@ -42,7 +42,7 @@ program
         args.passwordHash
       );
       const app = new App(args);
-      logger.info(`Reading data from:`, app.db.path());
+      logger.debug(`Reading data from:`, app.db.path());
 
       let choices = [
         { value: 'create', name: 'Create new secret' },
