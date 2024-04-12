@@ -4,12 +4,12 @@ import { Command } from 'commander';
 import Path from 'path';
 import { prompt } from './utils.js';
 import App from './app.js';
-import Cipher from '../sdk/cipher.js';
+import Cipher from 'sdk/cipher.js';
 import createSecret from './wizards/createSecret.js';
 import getEncryptionKey from './wizards/getEncryptionKey.js';
 import getSecret from './wizards/getSecret.js';
-import OTP from '../sdk/otp.js';
-import { Logger } from '../shared/logger.js';
+import OTP from 'sdk/otp.js';
+import { Logger } from 'shared/logger.js';
 
 const logger = new Logger();
 const program = new Command();

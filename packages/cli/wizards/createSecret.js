@@ -43,6 +43,12 @@ const wizard = async (app) => {
       {
         const password = await prompt([
           {
+            name: 'url',
+            message: 'url:',
+            type: 'input',
+            required: false,
+          },
+          {
             name: 'username',
             message: 'username:',
             type: 'input',
@@ -60,6 +66,7 @@ const wizard = async (app) => {
           value: password.value,
           typeOptions: {
             username: password.username,
+            url: password.url,
           },
         };
       }

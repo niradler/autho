@@ -15,26 +15,12 @@
     "pkg": "pkg build/bin.js --output dist/autho --target node18-win-x64,node18-linux-x64,node18-macos-x64,node18-mac-arm64",
     "release": "gh release create v0.0.5 ./dist"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "secrets",
+    "otp"
+  ],
+  "author": "Nir Adler",
   "license": "MIT",
-  "dependencies": {
-    "body-parser": "^1.20.2",
-    "commander": "^12.0.0",
-    "conf": "^12.0.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "ejs": "^3.1.9",
-    "env-paths": "^3.0.0",
-    "express": "^4.19.2",
-    "inquirer": "^9.2.17",
-    "inquirer-autocomplete-standalone": "^0.8.1",
-    "joi": "^17.12.2",
-    "morgan": "^1.10.0",
-    "otpauth": "^9.2.2",
-    "pino": "^8.20.0",
-    "pino-pretty": "^11.0.0"
-  },
   "description": "Open Source Authentication and Password Management Tool",
   "devDependencies": {
     "@eslint/js": "^9.0.0",

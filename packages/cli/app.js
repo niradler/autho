@@ -1,7 +1,7 @@
-import Secrets from '../sdk/secrets.js';
-import DB from '../sdk/db.js';
-import Cipher from '../sdk/cipher.js';
-import config from '../shared/config.js';
+import Secrets from 'sdk/secrets.js';
+import DB from 'sdk/db.js';
+import Cipher from 'sdk/cipher.js';
+import config from 'shared/config.js';
 import { ask } from './utils.js';
 
 export default class App {
