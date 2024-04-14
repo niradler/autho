@@ -1,5 +1,5 @@
 {
-  "name": "autho",
+  "name": "@autho",
   "version": "0.0.6",
   "main": "build/bin.js",
   "type": "module",
