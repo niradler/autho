@@ -57,7 +57,7 @@ Autho is licensed under the [MIT License](link-to-license), allowing for unrestr
 
 ## Support
 
-For support or inquiries, please reach out to the [official Autho community](link-to-community) for assistance.
+For support or inquiries, please open an issue for assistance.
 
 ## Acknowledgments
 
