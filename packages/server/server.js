@@ -15,31 +15,30 @@ app.app.set('views', path.join(__dirname, 'views'));
 app.app.set('view engine', 'ejs');
 
 const viewsContext = (req, res, next) => {
-    res.locals = {
-        title: 'Autho',
-        apiUrl: "http://localhost:8051/api"
-    }
-    next()
-}
+  res.locals = {
+    title: 'Autho',
+    apiUrl: 'http://localhost:8051/api',
+  };
+  next();
+};
 
 app.uses([
-    express.json(),
-    bodyParser.urlencoded({ extended: true }),
-    cors(),
-    morgan('dev'),
-    viewsContext
+  express.json(),
+  bodyParser.urlencoded({ extended: true }),
+  cors(),
+  morgan('dev'),
+  viewsContext,
 ]);
 
 app.routes((router) => {
-    router.use('/public', express.static(path.join(__dirname, 'public')));
-    const apiRouter = express.Router();
-    const apiRoutes = controllers(apiRouter);
-    router.use('/api', authMiddleware, apiRoutes);
+  router.use('/public', express.static(path.join(__dirname, 'public')));
+  const apiRouter = express.Router();
+  const apiRoutes = controllers(apiRouter);
+  router.use('/api', authMiddleware, apiRoutes);
 
-    router.get('/', (req, res) => {
-        res.render('index', {});
-    });
-
+  router.get('/', (req, res) => {
+    res.render('index', {});
+  });
 });
 
 app.start();

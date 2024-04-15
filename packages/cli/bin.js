@@ -30,7 +30,7 @@ program
   .option('-ph, --passwordHash <passwordHash>', 'Master password hash')
   .option('-n, --name <name>', 'Collection name', 'default')
   .option(
-    '-d, --dataFolder <folderPath>',
+    '-data, --dataFolder <folderPath>',
     'Folder path to store secrets db',
     getAuthoAbsolutePath
   )
@@ -112,6 +112,37 @@ program
       console.log(error.stack);
       process.exit(1);
     }
+  });
+
+program
+  .command('file')
+  .description('Encrypt/Decrypt file')
+  .option('-f, --filePath <filePath>', 'File path')
+  .option('-en, --encrypt', 'Encrypt file', false)
+  .option('-de, --decrypt', 'Decrypt file', false)
+  .option('--override', 'Override original file', false)
+  .action(async (args) => {
+    const { encrypt, decrypt, filePath, override } = args;
+    const encryptionKey = await App.masterKey();
+    if (!encrypt && !decrypt) {
+      console.log('Please provide either --encrypt or --decrypt');
+      process.exit(1);
+    } else if (encrypt) {
+      if (filePath.endsWith('.autho')) {
+        console.log('.autho files are already encrypted.');
+        process.exit(1);
+      }
+      console.log('Encrypting file:', filePath);
+      const outputFilePath = override ? filePath : filePath + '.autho';
+      Cipher.encryptFile(filePath, outputFilePath, encryptionKey);
+    } else if (decrypt) {
+      console.log('Decrypting file:', filePath);
+      const outputFilePath = filePath.endsWith('.autho')
+        ? filePath.replace(/\.autho$/, '')
+        : filePath;
+      Cipher.decryptFile(filePath, outputFilePath, encryptionKey);
+    }
+    process.exit(0);
   });
 
 program.parse();

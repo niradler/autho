@@ -60,6 +60,8 @@ export default class Cipher {
       signature: Cipher.sign(value),
       encoding,
       authTag,
+      provider: 'crypto',
+      platform: 'autho',
     };
   }
 
@@ -94,21 +96,42 @@ export default class Cipher {
     return decrypted;
   }
 
+  static canDecrypt(options) {
+    return options.platform === 'autho';
+  }
+
   static encryptFile(inputFilePath, outputFilePath, encryptionKey) {
     const inputBuffer = fs.readFileSync(inputFilePath);
-    const encryptedData = Cipher.encrypt(inputBuffer, encryptionKey);
+    const params = {
+      value: inputBuffer,
+      encryptionKey,
+    };
+    const encryptedData = Cipher.encrypt(params);
 
     fs.writeFileSync(
       outputFilePath,
-      Buffer.from(JSON.stringify(encryptedData))
+      Buffer.from(JSON.stringify(encryptedData)).toString('base64')
     );
   }
 
   static decryptFile(inputFilePath, outputFilePath, encryptionKey) {
     const inputFileContent = fs.readFileSync(inputFilePath);
-    const encryptedData = JSON.parse(inputFileContent.toString());
+    const decoded = Buffer.from(
+      inputFileContent.toString('utf-8'),
+      'base64'
+    ).toString('utf-8');
+    const encryptedData = JSON.parse(decoded);
 
-    const decryptedData = Cipher.decrypt(encryptedData, encryptionKey);
+    if (!Cipher.canDecrypt(encryptedData)) {
+      throw new Error('Invalid file');
+    }
+
+    const params = {
+      ...encryptedData,
+      value: encryptedData.encrypted,
+      encryptionKey,
+    };
+    const decryptedData = Cipher.decrypt(params);
     fs.writeFileSync(outputFilePath, decryptedData);
   }
 }
