@@ -1,44 +1,45 @@
 import Cipher from '../../sdk/cipher.js';
 
 const cleanSecret = (secret) => {
-
-    return {
-        id: secret.id,
-        name: secret.name,
-        type: secret.type,
-        createdAt: secret.createdAt,
-        typeOptions: secret.typeOptions,
-        protected: secret.protected,
-    };
-}
+  return {
+    id: secret.id,
+    name: secret.name,
+    type: secret.type,
+    createdAt: secret.createdAt,
+    typeOptions: secret.typeOptions,
+    protected: secret.protected,
+  };
+};
 
 export const secretsRouter = (router) => {
-    router.get('/secrets/:id', async (req, res) => {
-        const readSecret = await req.app.secrets.get(req.params.id);
-        const value = Cipher.decrypt({ ...readSecret, encryptionKey: req.app.masterPasswordHash });
-
-        res.json({ data: { ...cleanSecret(readSecret), value } });
+  router.get('/secrets/:id', async (req, res) => {
+    const readSecret = await req.app.secrets.get(req.params.id);
+    const value = Cipher.decrypt({
+      ...readSecret,
+      encryptionKey: req.app.masterPasswordHash,
     });
 
-    router.delete('/secrets/:id', (req, res) => {
-        req.app.secrets.remove(req.params.id);
+    res.json({ data: { ...cleanSecret(readSecret), value } });
+  });
 
-        res.json({ message: 'Deleted!' });
-    });
+  router.delete('/secrets/:id', (req, res) => {
+    req.app.secrets.remove(req.params.id);
 
-    router.get('/secrets', (req, res) => {
-        const data = req.app.db.get('secrets', []);
+    res.json({ message: 'Deleted!' });
+  });
 
-        res.json({ data: data.map(cleanSecret) });
-    });
+  router.get('/secrets', (req, res) => {
+    const data = req.app.db.get('secrets', []);
 
-    router.post('/secrets', async (req, res) => {
-        const data = req.body;
-        await req.app.secrets.add(data, req.app.masterPasswordHash);
+    res.json({ data: data.map(cleanSecret) });
+  });
 
-        res.json({ message: 'Created' });
-    });
+  router.post('/secrets', async (req, res) => {
+    const data = req.body;
+    await req.app.secrets.add(data, req.app.masterPasswordHash);
 
+    res.json({ message: 'Created' });
+  });
 };
 
 export default secretsRouter;
