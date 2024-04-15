@@ -53,7 +53,7 @@ Autho is an open-source project, and contributions are welcome! Feel free to rep
 
 ## License
 
-Autho is licensed under the [MIT License](link-to-license), allowing for unrestricted use, modification, and distribution.
+Autho is licensed under the [MIT License](LICENSE), allowing for unrestricted use, modification, and distribution.
 
 ## Support
 
