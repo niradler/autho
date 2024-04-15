@@ -33,7 +33,9 @@ This will start the Autho CLI, where you can generate OTPs, manage passwords, an
 
 3. **Managing Passwords**: Autho provides a secure vault for storing and managing your passwords. You can add, view, update, and delete passwords using the CLI interface.
 
-4. **Self-Hosting**: If you prefer self-hosting, deploy Autho on your own server by following the instructions provided in the documentation.
+4. **Secure files**: Autho offers a reliable method for encrypting and decrypting files, ensuring their security and integrity.
+
+5. **Self-Hosting**: If you prefer self-hosting, deploy Autho on your own server by following the instructions provided in the documentation. (TBD)
 
 ## Security Considerations
 
