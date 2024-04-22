@@ -8,7 +8,7 @@ export default class App {
   constructor(options = {}) {
     this.encryptionKey = options.encryptionKey || config.masterPasswordHash;
     this.dataFolder = options.dataFolder || config.dataFolder;
-    this.name = options.name || 'default';
+    this.name = options.name || config.name;
 
     this.db = new DB({
       encryptionKey: this.encryptionKey,
@@ -20,6 +20,7 @@ export default class App {
 
   static async masterKey(masterPassword, masterPasswordHash) {
     masterPassword = masterPassword || config.masterPassword;
+    masterPasswordHash = masterPasswordHash || config.masterPasswordHash;
 
     if (masterPasswordHash) {
       return masterPasswordHash;

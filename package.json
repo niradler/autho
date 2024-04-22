@@ -16,8 +16,8 @@
     "pkg:macos-arm64": "pkg build/bin.js --output dist/autho --target node18-macos-arm64",
     "pkg:macos": "pkg build/bin.js --output dist/autho-macos --target node18-macos-x64",
     "pkg:linux": "pkg build/bin.js --output dist/autho-linux --target node18-linux-x64",
-    "pkg:win": "pkg build/bin.js --output dist/autho-win --target node18-win-x64",
-    "release": "gh release create v0.0.8 ./dist/* --title 'v0.0.8' --generate-notes --prerelease"
+    "pkg:win": "pkg build/bin.js --output dist/autho-win --target node18-win-x64 --win portable",
+    "release": "gh release create v0.0.10 './dist/autho*' --title 'v0.0.10' --generate-notes --prerelease"
   },
   "keywords": [
     "secrets",

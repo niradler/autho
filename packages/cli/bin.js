@@ -10,7 +10,12 @@ import getEncryptionKey from './wizards/getEncryptionKey.js';
 import getSecret from './wizards/getSecret.js';
 import OTP from 'sdk/otp.js';
 import { Logger } from 'shared/logger.js';
+import readline from 'readline';
 
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+});
 const logger = new Logger();
 const program = new Command();
 
@@ -37,13 +42,33 @@ const basename = (filePath) => {
   return folderName;
 };
 
+function printLine(text, cursorTo = 0, moveCursor = 0) {
+  readline.cursorTo(process.stdout, cursorTo);
+  process.stdout.write(text + ' ');
+  readline.moveCursor(process.stdout, cursorTo, moveCursor);
+}
+
+const countDown = async (textStart, textEnd, seconds) => {
+  return new Promise((resolve) => {
+    const interval = setInterval(() => {
+      printLine(textStart + seconds + 's')
+      seconds--;
+      if (seconds < 0) {
+        printLine(textEnd);
+        clearInterval(interval);
+        resolve()
+      }
+    }, 1000);
+  })
+};
+
 program
   .name('autho')
   .description('Secrets manager')
-  .version('0.0.1')
+  .version('0.0.10')
   .option('-p, --password <password>', 'Master password')
   .option('-ph, --passwordHash <passwordHash>', 'Master password hash')
-  .option('-n, --name <name>', 'Collection name', 'default')
+  .option('-n, --name <name>', 'Collection name')
   .option(
     '-data, --dataFolder <folderPath>',
     'Folder path to store secrets db',
@@ -99,10 +124,8 @@ program
                 {
                   const otp = new OTP(readSecret);
                   console.log('OTP code:', otp.generate());
-                  setTimeout(() => {
-                    console.log('Expired');
-                    process.exit(0);
-                  }, 30000);
+                  await countDown('Expired at: ', 'The code is not longer valid, please generate new code.', 30);
+                  process.exit(0);
                 }
 
                 break;
