@@ -12,10 +12,6 @@ import OTP from 'sdk/otp.js';
 import { Logger } from 'shared/logger.js';
 import readline from 'readline';
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout
-});
 const logger = new Logger();
 const program = new Command();
 
