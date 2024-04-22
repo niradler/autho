@@ -1,6 +1,6 @@
 {
   "name": "autho",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "main": "build/bin.js",
   "type": "commonjs",
   "bin": {
@@ -17,7 +17,7 @@
     "pkg:macos": "pkg build/bin.js --output dist/autho-macos --target node18-macos-x64",
     "pkg:linux": "pkg build/bin.js --output dist/autho-linux --target node18-linux-x64",
     "pkg:win": "pkg build/bin.js --output dist/autho-win --target node18-win-x64",
-    "release": "gh release create v0.0.8 ./dist"
+    "release": "gh release create v0.0.8 ./dist/* --title 'v0.0.8' --generate-notes --prerelease"
   },
   "keywords": [
     "secrets",
