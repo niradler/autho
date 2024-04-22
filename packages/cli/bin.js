@@ -22,6 +22,21 @@ const getAuthoAbsolutePath = (path) => {
   return Path.join(process.cwd(), path, '.autho');
 };
 
+const toAbsolutePath = (inputPath) => {
+  if (Path.isAbsolute(inputPath)) {
+    return inputPath;
+  } else {
+    return Path.join(process.cwd(), inputPath);
+  }
+};
+
+const basename = (filePath) => {
+  const normalizedPath = Path.normalize(filePath);
+  const folderName = Path.basename(normalizedPath);
+
+  return folderName;
+};
+
 program
   .name('autho')
   .description('Secrets manager')
@@ -122,7 +137,10 @@ program
   .option('-de, --decrypt', 'Decrypt file', false)
   .option('--override', 'Override original file', false)
   .action(async (args) => {
-    const { encrypt, decrypt, filePath, override } = args;
+    logger.debug(`file:`, args);
+    const { encrypt, decrypt, override } = args;
+    let { filePath } = args;
+    filePath = toAbsolutePath(filePath);
     const encryptionKey = await App.masterKey();
     if (!encrypt && !decrypt) {
       console.log('Please provide either --encrypt or --decrypt');
@@ -142,6 +160,50 @@ program
         : filePath;
       Cipher.decryptFile(filePath, outputFilePath, encryptionKey);
     }
+    process.exit(0);
+  });
+
+program
+  .command('files')
+  .description('Encrypt/Decrypt file')
+  .option('--input <inputPath>', 'Folder path')
+  .option('--output <outputPath>', 'Folder path', process.cwd())
+  .option('-en, --encrypt', 'Encrypt folder', false)
+  .option('-de, --decrypt', 'Decrypt folder', false)
+  .action(async (args) => {
+    try {
+      logger.debug(`files:`, args);
+
+      const { encrypt, decrypt } = args;
+      let { input, output } = args;
+      input = toAbsolutePath(input);
+      output = toAbsolutePath(output);
+
+      const folderName = basename(input);
+      const encryptionKey = await App.masterKey();
+
+      if (!encrypt && !decrypt) {
+        console.log('Please provide either --encrypt or --decrypt');
+        process.exit(1);
+      } else if (encrypt) {
+        console.log('Encrypting files:', input);
+        const outputFilePath = Path.join(output, folderName + '.gzip.autho');
+        await Cipher.encryptFolder({
+          inputFolderPath: input, outputFilePath, encryptionKey
+        });
+        console.log('Created:', outputFilePath);
+      } else if (decrypt) {
+        console.log('Decrypting files:', input);
+        await Cipher.decryptFolder({
+          inputFilePath: input, outputFolderPath: output, encryptionKey
+        });
+      }
+    } catch (error) {
+      logger.error('Something went wrong, Error: ', error.message);
+      console.log(error.stack);
+      process.exit(1);
+    }
+
     process.exit(0);
   });
 

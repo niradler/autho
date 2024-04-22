@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
+import Path from 'path';
+import zlib from 'zlib';
 import config from '../shared/config.js';
 
 export default class Cipher {
@@ -134,4 +136,92 @@ export default class Cipher {
     const decryptedData = Cipher.decrypt(params);
     fs.writeFileSync(outputFilePath, decryptedData);
   }
+
+  static encryptFolder({ inputFolderPath, outputFilePath, encryptionKey, algorithm = config.encryptionALgo, encoding = 'hex' }) {
+    const outputStream = fs.createWriteStream(outputFilePath);
+    const gzip = zlib.createGzip();
+    gzip.pipe(outputStream);
+    const baseFolder = Path.basename(inputFolderPath)
+
+    function traverseFolder(folderPath) {
+      const items = fs.readdirSync(folderPath);
+
+      for (const item of items) {
+        const itemPath = Path.join(baseFolder, Path.relative(inputFolderPath, Path.join(folderPath, item)));
+
+        if (fs.statSync(itemPath).isDirectory()) {
+
+          traverseFolder(itemPath);
+        } else {
+          const fileContent = fs.readFileSync(itemPath);
+          const params = {
+            value: fileContent,
+            encryptionKey,
+            algorithm,
+            encoding
+          };
+          const encryptedData = Cipher.encrypt(params);
+          const encrypted = encryptedData.encrypted;
+          delete encryptedData.encrypted;
+          const encryptionMeta = Buffer.from(JSON.stringify(encryptedData)).toString('base64');
+          gzip.write(`${itemPath}\n---\n${encrypted}\n---\n${encryptionMeta}\n:::\n`);
+        }
+      }
+    }
+
+    traverseFolder(inputFolderPath);
+
+    gzip.end();
+
+    return new Promise((resolve, reject) => {
+      outputStream.on('finish', resolve);
+      outputStream.on('error', reject);
+    });
+  }
+
+  static decryptFolder({ inputFilePath, outputFolderPath, encryptionKey }) {
+    const inputStream = fs.createReadStream(inputFilePath);
+    const gunzip = zlib.createGunzip();
+    inputStream.pipe(gunzip);
+
+    let buff = '';
+
+    const compileFile = (data) => {
+      buff += data;
+      if (buff.includes(':::')) {
+        const [file, next] = buff.split('\n:::\n');
+        let [filePath, encrypted, encryptionMeta] = file.split('\n---\n');
+        filePath = Path.join(outputFolderPath, filePath);
+        try {
+          fs.mkdirSync(Path.dirname(filePath), { recursive: true });
+          // eslint-disable-next-line no-unused-vars, no-empty
+        } catch (error) { }
+        const decoded = Buffer.from(
+          encryptionMeta,
+          'base64'
+        ).toString('utf-8');
+        const metaData = JSON.parse(decoded);
+        const params = {
+          ...metaData,
+          value: encrypted,
+          encryptionKey
+        };
+
+        const decryptedData = Cipher.decrypt(params);
+        fs.writeFileSync(filePath, decryptedData);
+
+        buff = next;
+      }
+    }
+
+    gunzip.on('data', (data) => {
+      compileFile(data.toString('utf8'))
+    });
+
+    return new Promise((resolve, reject) => {
+      gunzip.on('end', resolve);
+      gunzip.on('error', reject);
+    });
+  }
+
 }
