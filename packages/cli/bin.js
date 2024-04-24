@@ -71,7 +71,7 @@ const initApp = async (args, opts) => {
 program
   .name('autho')
   .description('Secrets manager')
-  .version('0.0.11')
+  .version('0.0.13')
   .option('-p, --password <password>', 'Master password')
   .option('-ph, --passwordHash <passwordHash>', 'Master password hash')
   .option('-n, --name <name>', 'Collection name')
