@@ -29,10 +29,13 @@ export default class Secrets {
       encryptionKey,
     });
 
+    const newSecret = { ...value, ...encryption, value: encrypted }
     this.secrets = [
       ...this.secrets,
-      { ...value, ...encryption, value: encrypted },
+      newSecret,
     ];
+
+    return newSecret;
   }
 
   async remove(id) {

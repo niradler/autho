@@ -1,4 +1,4 @@
-import { prompt } from '../utils.js';
+import { prompt, generateOTP } from '../utils.js';
 import getEncryptionKey from './getEncryptionKey.js';
 
 const wizard = async (app) => {
@@ -106,6 +106,44 @@ const wizard = async (app) => {
             required: true,
           },
         ]);
+
+        const test = await prompt([
+          {
+            name: 'validate',
+            message: 'validate:',
+            type: 'confirm',
+            default: false,
+            required: true,
+          }
+        ]);
+
+        if (test.validate) {
+          generateOTP({
+            name: info.name,
+            value: otp.value,
+          })
+          // eslint-disable-next-line no-constant-condition
+          while (1) {
+            const valid = await prompt([
+              {
+                name: 'try',
+                message: 'try again?',
+                type: 'confirm',
+                default: false,
+                required: true,
+              }
+            ]);
+            if (!valid.try) {
+              break;
+            } else {
+              generateOTP({
+                name: info.name,
+                value: otp.value,
+              })
+            }
+          }
+
+        }
         newSecret = {
           ...info,
           value: otp.value,
@@ -118,7 +156,8 @@ const wizard = async (app) => {
       break;
   }
 
-  await secrets.add(newSecret, encryptionKey);
+  const created = await secrets.add(newSecret, encryptionKey);
+  console.log('Secret created:', created.id);
 };
 
 export default wizard;

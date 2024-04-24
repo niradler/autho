@@ -9,7 +9,7 @@ const wizard = async (app) => {
 
   const choices = existingSecrets.map((secret) => ({
     value: secret.id,
-    name: `${secret.name} (${secret.typeOptions.username || secret.id})`,
+    name: `${secret.name} ${secret.typeOptions.username ? `(${secret.typeOptions.username}) ` : ''}(${secret.id})`,
   }));
 
   const { id: secretId } = await prompt({
