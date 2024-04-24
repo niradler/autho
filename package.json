@@ -17,6 +17,7 @@
     "pkg:macos": "pkg build/bin.js --output dist/autho-macos --target node18-macos-x64",
     "pkg:linux": "pkg build/bin.js --output dist/autho-linux --target node18-linux-x64",
     "pkg:win": "pkg build/bin.js --output dist/autho-win --target node18-win-x64 --win portable",
+    "semantic-release": "semantic-release",
     "release": "gh release create v0.0.10 './dist/autho*' --title 'v0.0.10' --generate-notes --prerelease"
   },
   "keywords": [
@@ -28,13 +29,16 @@
   "description": "Open Source Authentication and Password Management Tool",
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
     "esbuild": "0.20.2",
     "eslint": "^9.0.0",
     "eslint-config-prettier": "^9.1.0",
     "globals": "^15.0.0",
     "jest": "^29.7.0",
     "pkg": "^5.8.1",
-    "prettier": "^3.2.5"
+    "prettier": "^3.2.5",
+    "semantic-release": "^23.0.8"
   },
   "files": [
     "build/bin.js"
