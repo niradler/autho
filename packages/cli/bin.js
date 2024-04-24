@@ -2,15 +2,13 @@
 
 import { Command } from 'commander';
 import Path from 'path';
-import { prompt } from './utils.js';
+import { prompt, generateOTP } from './utils.js';
 import App from './app.js';
 import Cipher from 'sdk/cipher.js';
 import createSecret from './wizards/createSecret.js';
 import getEncryptionKey from './wizards/getEncryptionKey.js';
 import getSecret from './wizards/getSecret.js';
-import OTP from 'sdk/otp.js';
 import { Logger } from 'shared/logger.js';
-import readline from 'readline';
 
 const logger = new Logger();
 const program = new Command();
@@ -38,46 +36,56 @@ const basename = (filePath) => {
   return folderName;
 };
 
-function printLine(text, cursorTo = 0, moveCursor = 0) {
-  readline.cursorTo(process.stdout, cursorTo);
-  process.stdout.write(text + ' ');
-  readline.moveCursor(process.stdout, cursorTo, moveCursor);
+function printLine(text) {
+  process.stdout.write('\u001b[2K' + '\u001b[1G');
+  process.stdout.write(text);
 }
+
 
 const countDown = async (textStart, textEnd, seconds) => {
   return new Promise((resolve) => {
     const interval = setInterval(() => {
-      printLine(textStart + seconds + 's')
+      printLine(textStart + seconds + 's');
       seconds--;
       if (seconds < 0) {
         printLine(textEnd);
+        process.stdout.write('\n');
         clearInterval(interval);
-        resolve()
+        resolve();
       }
     }, 1000);
-  })
+  });
 };
+
+const initApp = async (args, opts) => {
+  const { password, passwordHash } = { ...opts, ...args };
+  args.encryptionKey = await App.masterKey(
+    password,
+    passwordHash
+  );
+  const app = new App(args);
+
+  return app;
+}
 
 program
   .name('autho')
   .description('Secrets manager')
-  .version('0.0.10')
+  .version('0.0.11')
   .option('-p, --password <password>', 'Master password')
   .option('-ph, --passwordHash <passwordHash>', 'Master password hash')
   .option('-n, --name <name>', 'Collection name')
   .option(
-    '-data, --dataFolder <folderPath>',
+    '--dataFolder <folderPath>',
     'Folder path to store secrets db',
     getAuthoAbsolutePath
   )
   .action(async (args) => {
     try {
-      logger.debug('args:', args);
-      args.encryptionKey = await App.masterKey(
-        args.password,
-        args.passwordHash
-      );
-      const app = new App(args);
+      logger.debug('input:', args);
+
+      const app = await initApp(args, program.opts());
+
       logger.debug(`Reading data from:`, app.db.path());
 
       let choices = [
@@ -118,23 +126,23 @@ program
                 break;
               case 'otp':
                 {
-                  const otp = new OTP(readSecret);
-                  console.log('OTP code:', otp.generate());
-                  await countDown('Expired at: ', 'The code is not longer valid, please generate new code.', 30);
-                  process.exit(0);
-                }
+                  generateOTP(readSecret);
+                  await countDown(
+                    'Expired in: ',
+                    'The code is not longer valid, please generate new code.',
+                    30
+                  );
 
+                }
                 break;
             }
           }
-
           break;
         case 'delete':
           {
             const deleteSecret = await getSecret(app);
             await app.secrets.remove(deleteSecret.id);
             console.log('Removed');
-            process.exit(0);
           }
           break;
         default:
@@ -146,6 +154,57 @@ program
       console.log(error.stack);
       process.exit(1);
     }
+    process.exit(0);
+
+  });
+
+program
+  .command('secret')
+  .description('Secret operations')
+  .option('--action <action>', 'Secret action (create/list/read/delete)', 'create')
+  .option('--id <id>', 'Secret id')
+  .option('--decrypt', 'Decrypt secret', false)
+  .action(async (args) => {
+    try {
+      logger.debug(`input:`, args);
+
+      const { id, decrypt, action } = args;
+      const app = await initApp(args, program.opts());
+      logger.debug(`Reading data from:`, app.db.path());
+      switch (action) {
+        case 'read': {
+          const selected = await app.secrets.get(id);
+          if (!selected) {
+            throw new Error('No secret found');
+          }
+          if (decrypt) {
+            selected.value = Cipher.decrypt({
+              ...selected,
+              encryptionKey: app.encryptionKey,
+            });
+          }
+          console.log(selected);
+          break;
+        }
+        case 'delete':
+          await app.secrets.remove(id);
+          break;
+        case 'create':
+          await createSecret(app);
+          break;
+        case 'list':
+          console.dir(app.secrets.secrets)
+          break;
+        default:
+          throw new Error('Unknown action:', action);
+      }
+    } catch (error) {
+      logger.error('Something went wrong, Error: ', error.message);
+      console.log(error.stack);
+      process.exit(1);
+    }
+
+    process.exit(0);
   });
 
 program
@@ -156,7 +215,7 @@ program
   .option('-de, --decrypt', 'Decrypt file', false)
   .option('--override', 'Override original file', false)
   .action(async (args) => {
-    logger.debug(`file:`, args);
+    logger.debug(`input:`, args);
     const { encrypt, decrypt, override } = args;
     let { filePath } = args;
     filePath = toAbsolutePath(filePath);
@@ -191,7 +250,7 @@ program
   .option('-de, --decrypt', 'Decrypt folder', false)
   .action(async (args) => {
     try {
-      logger.debug(`files:`, args);
+      logger.debug(`input:`, args);
 
       const { encrypt, decrypt } = args;
       let { input, output } = args;
@@ -208,13 +267,17 @@ program
         console.log('Encrypting files:', input);
         const outputFilePath = Path.join(output, folderName + '.gzip.autho');
         await Cipher.encryptFolder({
-          inputFolderPath: input, outputFilePath, encryptionKey
+          inputFolderPath: input,
+          outputFilePath,
+          encryptionKey,
         });
         console.log('Created:', outputFilePath);
       } else if (decrypt) {
         console.log('Decrypting files:', input);
         await Cipher.decryptFolder({
-          inputFilePath: input, outputFolderPath: output, encryptionKey
+          inputFilePath: input,
+          outputFolderPath: output,
+          encryptionKey,
         });
       }
     } catch (error) {
@@ -226,4 +289,4 @@ program
     process.exit(0);
   });
 
-program.parse();
+program.parse(process.argv);
