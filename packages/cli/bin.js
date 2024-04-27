@@ -9,6 +9,7 @@ import createSecret from './wizards/createSecret.js';
 import getEncryptionKey from './wizards/getEncryptionKey.js';
 import getSecret from './wizards/getSecret.js';
 import { Logger } from 'shared/logger.js';
+import { importSecrets } from './import.js';
 
 const logger = new Logger();
 const program = new Command();
@@ -159,6 +160,24 @@ program
   });
 
 program
+  .command('import')
+  .description('Secret operations')
+  .option('--filePath <filePath>', 'backup file path (should be json)')
+  .action(async (args) => {
+
+    try {
+      logger.debug(`input:`, args);
+      const { filePath } = args;
+      const app = await initApp(args, program.opts());
+      await importSecrets(app, toAbsolutePath(filePath));
+    } catch (error) {
+      logger.error('Something went wrong, Error: ', error.message);
+      logger.debug(error.stack);
+      process.exit(1);
+    }
+  });
+
+program
   .command('secret')
   .description('Secret operations')
   .option('--action <action>', 'Secret action (create/list/read/delete)', 'create')
@@ -200,7 +219,7 @@ program
       }
     } catch (error) {
       logger.error('Something went wrong, Error: ', error.message);
-      console.log(error.stack);
+      logger.debug(error.stack);
       process.exit(1);
     }
 
@@ -282,7 +301,7 @@ program
       }
     } catch (error) {
       logger.error('Something went wrong, Error: ', error.message);
-      console.log(error.stack);
+      logger.debug(error.stack);
       process.exit(1);
     }
 

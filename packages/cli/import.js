@@ -1,31 +1,67 @@
 import fs from 'fs';
-import App from './app.js';
 
-export const importSecrets = async (backupFilePath, type = 'otp') => {
-    const backupSecrets = JSON.parse(fs.readFileSync(backupFilePath).toString('utf-8'))
+const createSecret = async (secret, app) => {
+    let created = false;
+    switch (secret.type) {
+        case 'otp': {
+            const newSecret = {
+                name: secret.name,
+                type: secret.type,
+                protected: false,
+                value: secret.secret,
+                typeOptions: {
+                    username: secret.username,
+                    digits: secret.digits,
+                    description: secret.description
+                },
+            };
+            created = await app.secrets.add(newSecret, app.encryptionKey);
+        }
+            break;
 
-    const encryptionKey = await App.masterKey();
-    const app = new App({ encryptionKey });
-    switch (type) {
-        case 'otp':
-            for (let secret of backupSecrets) {
-                if (!secret) continue;
+        case 'password': {
+            const newSecret = {
+                name: secret.name,
+                type: secret.type,
+                protected: false,
+                value: secret.secret,
+                typeOptions: {
+                    username: secret.username,
+                    url: secret.url,
+                    description: secret.description
+                },
+            };
+            created = await app.secrets.add(newSecret, app.encryptionKey);
+        }
+            break;
 
-                const newSecret = {
-                    name: secret.name,
-                    type: "otp",
-                    protected: false,
-                    value: secret.secret,
-                    typeOptions: {
-                        username: secret.username,
-                        digits: secret.digits
-                    },
-                };
-                await app.secrets.add(newSecret, encryptionKey);
-            }
+        case 'note': {
+            const newSecret = {
+                name: secret.name,
+                type: secret.type,
+                protected: false,
+                value: secret.secret,
+                typeOptions: {
+                    description: secret.description
+                },
+            };
+            created = await app.secrets.add(newSecret, app.encryptionKey);
+        }
             break;
 
         default:
-            throw new Error(`Unknown type: ${type}`);
+            throw new Error(`Unknown type: ${secret.type}`);
+    }
+
+    if (created)
+        console.log(`Secret created: ${created.id}`)
+}
+
+export const importSecrets = async (app, backupFilePath) => {
+    const backupSecrets = JSON.parse(fs.readFileSync(backupFilePath).toString('utf-8'))
+
+    for (let secret of backupSecrets) {
+        if (!secret) continue;
+        await createSecret(secret, app);
     }
 };
