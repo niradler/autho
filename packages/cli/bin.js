@@ -72,7 +72,7 @@ const initApp = async (args, opts) => {
 program
   .name('autho')
   .description('Secrets manager')
-  .version('0.0.13')
+  .version('0.0.14')
   .option('-p, --password <password>', 'Master password')
   .option('-ph, --passwordHash <passwordHash>', 'Master password hash')
   .option('-n, --name <name>', 'Collection name')
@@ -161,7 +161,7 @@ program
 
 program
   .command('import')
-  .description('Secret operations')
+  .description('Import secrets from backup file')
   .option('--filePath <filePath>', 'backup file path (should be json)')
   .action(async (args) => {
 
@@ -262,7 +262,7 @@ program
 
 program
   .command('files')
-  .description('Encrypt/Decrypt file')
+  .description('Encrypt/Decrypt files')
   .option('--input <inputPath>', 'Folder path')
   .option('--output <outputPath>', 'Folder path', process.cwd())
   .option('-en, --encrypt', 'Encrypt folder', false)
