@@ -1,26 +1,31 @@
 import fs from 'fs';
 import App from './app.js';
 
-const main = async (backupFilePath) => {
-    const backupSecrets = fs.readFileSync(backupFilePath).toString('utf-8').split('\n');
+export const importSecrets = async (backupFilePath, type = 'otp') => {
+    const backupSecrets = JSON.parse(fs.readFileSync(backupFilePath).toString('utf-8'))
 
     const encryptionKey = await App.masterKey();
     const app = new App({ encryptionKey });
+    switch (type) {
+        case 'otp':
+            for (let secret of backupSecrets) {
+                if (!secret) continue;
 
-    for (let secret of backupSecrets) {
-        if (!secret) continue;
+                const newSecret = {
+                    name: secret.name,
+                    type: "otp",
+                    protected: false,
+                    value: secret.secret,
+                    typeOptions: {
+                        username: secret.username,
+                        digits: secret.digits
+                    },
+                };
+                await app.secrets.add(newSecret, encryptionKey);
+            }
+            break;
 
-        const newSecret = {
-            name: secret.name,
-            type: "otp",
-            protected: false,
-            value: secret.secret,
-            typeOptions: {
-                username: secret.username,
-                digits: secret.digits
-            },
-        };
-        await app.secrets.add(newSecret, encryptionKey);
+        default:
+            throw new Error(`Unknown type: ${type}`);
     }
 };
-main();
