@@ -19,12 +19,6 @@ To install Autho globally, use npm:
 npm install -g autho
 ```
 
-## Usage
-
-After installing Autho, you can run the `autho` command in your terminal to access its functionalities:
-
-This will start the Autho CLI, where you can generate OTPs, manage passwords, and configure settings as needed.
-
 ## Getting Started
 
 1. **Setting Up Autho**: After installation, run the `autho` command to set up Autho for the first time. Follow the on-screen instructions to configure your master password and other settings.
@@ -46,6 +40,117 @@ This will start the Autho CLI, where you can generate OTPs, manage passwords, an
 - **Self-Hosting**: By self-hosting Autho, users maintain control over their data and reduce reliance on external services, minimizing the risk of data breaches.
 
 - **Regular Updates**: Keep Autho and its dependencies up to date to ensure that security vulnerabilities are addressed promptly.
+
+## Usage
+
+```bash
+autho [options] [command]
+```
+
+### Options:
+
+- `--version`: Output the version number
+- `-p, --password <password>`: Master password
+- `-ph, --passwordHash <passwordHash>`: Master password hash
+- `-n, --name <name>`: Collection name
+- `--dataFolder <folderPath>`: Folder path to store secrets db
+- `-h, --help`: Display help for command
+
+### Commands:
+
+#### 0. `prompt`
+
+The main terminal ui, recommended most ot the time.
+
+```bash
+autho
+```
+
+#### 1. `import`
+
+Import secrets from a backup file.
+
+```bash
+autho import --filePath <filePath>
+```
+
+#### 2. `secret`
+
+Perform secret operations like creating, listing, reading, and deleting secrets.
+
+```bash
+autho secret [options]
+```
+
+Options:
+- `--action <action>`: Secret action (create/list/read/delete)
+- `--id <id>`: Secret id
+- `--decrypt`: Decrypt secret
+
+#### 3. `file`
+
+Encrypt/Decrypt a file.
+
+```bash
+autho file [options]
+```
+
+Options:
+- `-f, --filePath <filePath>`: File path
+- `-en, --encrypt`: Encrypt file
+- `-de, --decrypt`: Decrypt file
+- `--override`: Override original file
+
+#### 4. `files`
+
+Encrypt/Decrypt files in a folder.
+
+```bash
+autho files [options]
+```
+
+Options:
+- `--input <inputPath>`: Folder path
+- `--output <outputPath>`: Folder path
+- `-en, --encrypt`: Encrypt folder
+- `-de, --decrypt`: Decrypt folder
+
+## Examples
+
+1. Import secrets from a backup file:
+```bash
+autho import --filePath backup.json
+```
+
+2. Create a new secret:
+```bash
+autho secret --action create
+```
+
+3. Read a secret:
+```bash
+autho secret --action read --id <secretId> --decrypt
+```
+
+4. Encrypt a file:
+```bash
+autho file --filePath secret.txt --encrypt
+```
+
+5. Decrypt a file:
+```bash
+autho file --filePath secret.txt.autho --decrypt
+```
+
+6. Encrypt files in a folder:
+```bash
+autho files --input /path/to/folder --encrypt
+```
+
+7. Decrypt files in a folder:
+```bash
+autho files --input /path/to/folder.autho --decrypt
+```
 
 ## Contributing
 
