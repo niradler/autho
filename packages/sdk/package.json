@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "conf": "^12.0.0",
-    "otpauth": "^9.2.2",
     "shared": "workspace:*"
   },
   "keywords": [],

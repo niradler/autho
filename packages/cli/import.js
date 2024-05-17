@@ -2,6 +2,7 @@ import fs from 'fs';
 
 const createSecret = async (secret, app) => {
     let created = false;
+
     switch (secret.type) {
         case 'otp': {
             const newSecret = {
@@ -12,7 +13,8 @@ const createSecret = async (secret, app) => {
                 typeOptions: {
                     username: secret.username,
                     digits: secret.digits,
-                    description: secret.description
+                    description: secret.description,
+                    algorithm: secret.algorithm
                 },
             };
             created = await app.secrets.add(newSecret, app.encryptionKey);
