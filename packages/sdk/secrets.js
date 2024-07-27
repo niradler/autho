@@ -19,6 +19,9 @@ export default class Secrets {
   }
 
   async add(secret, encryptionKey) {
+    secret.createdAt = new Date();
+    secret.id = Cipher.randomString();
+    
     const { value, error } = createSecretSchema.validate(secret);
     if (error) {
       throw new Error(error);
