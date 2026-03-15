@@ -25,7 +25,15 @@ This release is the Bun migration and legacy-parity cut. It keeps the existing c
 - Each vault gets a random root key
 - Secret payloads and file artifacts use AES-256-GCM envelope encryption
 - The vault uses SQLite instead of the old `conf` store
+- Local daemon auth tokens are stored with `Bun.secrets` when the OS secret store is available
 - Audit events record access without storing secret values
+- Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
+
+Current at-rest boundary for this release:
+
+- Secret payloads, wrapped keys, and encrypted artifacts are encrypted at rest
+- SQLite metadata such as names, types, timestamps, leases, and audit rows is not fully encrypted at rest
+- If the OS secret store is unavailable, the daemon token falls back to the local state file
 
 ## Requirements
 
@@ -40,7 +48,7 @@ bun run hooks:install
 bun run autho -- init --password "correct horse battery staple"
 ```
 
-By default, Autho stores runtime state in `~/.autho`. For tests or isolated environments you can override that with `AUTHO_HOME`.
+By default, Autho stores runtime state in `~/.autho`. For tests, CI, or isolated environments you can override that with `AUTHO_HOME`.
 
 Run the interactive prompt:
 
@@ -154,4 +162,3 @@ bun test
 ## Current Scope
 
 This release is intended to be stable for local-first Bun usage and parity with the legacy vault workflows. Planned future work such as proxy mode, richer agent policy management, and a fuller dashboard remains tracked in [plan.md](./plan.md) and is not part of this release cut.
-

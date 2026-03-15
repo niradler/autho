@@ -83,4 +83,6 @@ After import, verify:
 
 - Imports are re-encrypted into the new SQLite plus envelope-encryption format.
 - The old master password hash is not reused as the new vault encryption key.
+- Runtime state defaults to `~/.autho`; use `AUTHO_HOME` to isolate test or migration runs from your normal local vault.
+- Local daemon auth now uses `Bun.secrets` when the OS secret store is available.
 - If you are uncertain about the integrity of older data, import first, validate, then rotate the most sensitive credentials.
