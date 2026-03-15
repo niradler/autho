@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 
 import { AuthoDatabase } from "../../storage/src/index.ts";
@@ -244,7 +244,8 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
   };
 
   const auth = (request: Request): Response | null => {
-    if (getBearerToken(request) !== token) {
+    const provided = getBearerToken(request);
+    if (!provided || provided.length !== token.length || !timingSafeEqual(Buffer.from(provided), Buffer.from(token))) {
       return unauthorized();
     }
     return null;

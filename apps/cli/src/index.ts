@@ -318,10 +318,10 @@ function help(): string {
     "  env render --password <value> --map <ENV_NAME=secretRef> [--map <ENV_NAME=secretRef>] [--project-file <path>] [--lease <lease-id>] [--vault <path>] [--json]",
     "  env sync --password <value> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--ttl <seconds>] [--output <path>] [--force] [--vault <path>] [--json]",
     "  exec --password <value> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--vault <path>] -- <command>",
-    "  file encrypt --password <value> --input <path> [--output <path>] [--vault <path>] [--json]",
-    "  file decrypt --password <value> --input <path> [--output <path>] [--vault <path>] [--json]",
-    "  files encrypt --password <value> --input <path> [--output <path>] [--vault <path>] [--json]",
-    "  files decrypt --password <value> --input <path> [--output <path>] [--vault <path>] [--json]",
+    "  file encrypt --password <value> --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
+    "  file decrypt --password <value> --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
+    "  files encrypt --password <value> --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
+    "  files decrypt --password <value> --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
     "  audit list --password <value> [--limit <number>] [--vault <path>] [--json]",
     "",
     "Notes:",
@@ -578,6 +578,7 @@ async function main(): Promise<void> {
         session.encryptFile(
           absolutePath(required(getString(args, "input"), "--input")),
           getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
+          { force: getBoolean(args, "force") },
         ),
         jsonMode,
       );
@@ -589,6 +590,7 @@ async function main(): Promise<void> {
         session.decryptFile(
           absolutePath(required(getString(args, "input"), "--input")),
           getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
+          { force: getBoolean(args, "force") },
         ),
         jsonMode,
       );
@@ -600,6 +602,7 @@ async function main(): Promise<void> {
         session.encryptFolder(
           absolutePath(required(getString(args, "input"), "--input")),
           getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
+          { force: getBoolean(args, "force") },
         ),
         jsonMode,
       );
@@ -611,6 +614,7 @@ async function main(): Promise<void> {
         session.decryptFolder(
           absolutePath(required(getString(args, "input"), "--input")),
           getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
+          { force: getBoolean(args, "force") },
         ),
         jsonMode,
       );

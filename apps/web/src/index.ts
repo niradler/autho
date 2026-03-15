@@ -233,7 +233,7 @@ async function main(): Promise<void> {
           return json(
             { expiresAt, sessionId },
             200,
-            { "set-cookie": `autho_session=${sessionId}; HttpOnly; SameSite=Strict; Path=/` },
+            { "set-cookie": `autho_session=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Secure` },
           );
         }
 
@@ -242,7 +242,7 @@ async function main(): Promise<void> {
           if (cookies.autho_session) {
             sessions.delete(cookies.autho_session);
           }
-          return json({ locked: true }, 200, { "set-cookie": "autho_session=; Max-Age=0; Path=/" });
+          return json({ locked: true }, 200, { "set-cookie": "autho_session=; Max-Age=0; Path=/; Secure" });
         }
 
         if (url.pathname.startsWith("/api/")) {

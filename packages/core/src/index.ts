@@ -821,11 +821,15 @@ export class VaultSession {
     };
   }
 
-  encryptFile(inputPath: string, outputPath?: string): { outputPath: string } {
+  encryptFile(inputPath: string, outputPath?: string, options?: { force?: boolean }): { outputPath: string } {
     assertPathIsFile(inputPath);
+    const resolvedOutput = outputPath ?? defaultEncryptedFilePath(inputPath);
+    if (!options?.force && existsSync(resolvedOutput)) {
+      throw new Error(`Output file already exists: ${resolvedOutput}`);
+    }
     const result = encryptFileArtifact(
       inputPath,
-      outputPath ?? defaultEncryptedFilePath(inputPath),
+      resolvedOutput,
       this.rootKey,
     );
     this.audit("file.encrypted", "artifact", null, "File encrypted", {
@@ -835,11 +839,15 @@ export class VaultSession {
     return result;
   }
 
-  decryptFile(inputPath: string, outputPath?: string): { outputPath: string } {
+  decryptFile(inputPath: string, outputPath?: string, options?: { force?: boolean }): { outputPath: string } {
     assertPathIsFile(inputPath);
+    const resolvedOutput = outputPath ?? defaultDecryptedFilePath(inputPath);
+    if (!options?.force && existsSync(resolvedOutput)) {
+      throw new Error(`Output file already exists: ${resolvedOutput}`);
+    }
     const result = decryptFileArtifact(
       inputPath,
-      outputPath ?? defaultDecryptedFilePath(inputPath),
+      resolvedOutput,
       this.rootKey,
     );
     this.audit("file.decrypted", "artifact", null, "File decrypted", {
@@ -849,11 +857,15 @@ export class VaultSession {
     return result;
   }
 
-  encryptFolder(inputPath: string, outputPath?: string): { fileCount: number; outputPath: string } {
+  encryptFolder(inputPath: string, outputPath?: string, options?: { force?: boolean }): { fileCount: number; outputPath: string } {
     assertPathIsDirectory(inputPath);
+    const resolvedOutput = outputPath ?? defaultEncryptedFolderPath(inputPath);
+    if (!options?.force && existsSync(resolvedOutput)) {
+      throw new Error(`Output file already exists: ${resolvedOutput}`);
+    }
     const result = encryptFolderArtifact(
       inputPath,
-      outputPath ?? defaultEncryptedFolderPath(inputPath),
+      resolvedOutput,
       this.rootKey,
     );
     this.audit("folder.encrypted", "artifact", null, "Folder encrypted", {
@@ -864,11 +876,15 @@ export class VaultSession {
     return result;
   }
 
-  decryptFolder(inputPath: string, outputPath?: string): { fileCount: number; outputPath: string } {
+  decryptFolder(inputPath: string, outputPath?: string, options?: { force?: boolean }): { fileCount: number; outputPath: string } {
     assertPathIsFile(inputPath);
+    const resolvedOutput = outputPath ?? defaultDecryptedFolderPath(inputPath);
+    if (!options?.force && existsSync(resolvedOutput)) {
+      throw new Error(`Output path already exists: ${resolvedOutput}`);
+    }
     const result = decryptFolderArtifact(
       inputPath,
-      outputPath ?? defaultDecryptedFolderPath(inputPath),
+      resolvedOutput,
       this.rootKey,
     );
     this.audit("folder.decrypted", "artifact", null, "Folder decrypted", {

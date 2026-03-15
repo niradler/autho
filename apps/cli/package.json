@@ -7,7 +7,8 @@
     "autho": "./dist/autho.js"
   },
   "files": [
-    "dist/autho.js"
+    "dist/autho.js",
+    "README.md"
   ],
   "engines": {
     "bun": ">=1.3.10"

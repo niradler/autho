@@ -4,7 +4,7 @@ import {
   readFileSync,
   statSync,
 } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve, sep } from "node:path";
 
 import {
   decryptWithKey,
@@ -93,6 +93,8 @@ export function encryptFileArtifact(inputPath: string, outputPath: string, rootK
     originalName: basename(inputPath),
     payload,
     version: 1,
+    // TODO(v0.3): use per-file AAD like `autho:file:dek:${originalName}` for stronger binding
+    // This is a format-breaking change — requires a version bump on the file envelope schema
     wrappedKey: encryptWithKey(fileKey, rootKey, "autho:file:dek"),
   };
 
@@ -175,7 +177,7 @@ export function decryptFolderArtifact(inputPath: string, outputPath: string, roo
   for (const entry of envelope.entries) {
     const destination = join(outputPath, entry.path);
     const resolvedDest = resolve(destination);
-    if (!resolvedDest.startsWith(resolvedOutput + "/") && !resolvedDest.startsWith(resolvedOutput + "\\") && resolvedDest !== resolvedOutput) {
+    if (!resolvedDest.startsWith(resolvedOutput + sep) && resolvedDest !== resolvedOutput) {
       throw new Error(`Path traversal detected in folder artifact: ${entry.path}`);
     }
     ensurePrivateParent(destination);
