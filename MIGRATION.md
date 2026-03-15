@@ -41,14 +41,23 @@ Direct in-product migration from the legacy `conf` store is not included in this
 
 ## Recommended Migration Steps
 
-1. Prepare a JSON backup in the format above.
-2. Initialize a new Bun vault.
-3. Import the JSON backup.
-4. Verify secrets, OTPs, and file workflows.
-5. Update automation to use the Bun CLI, daemon, and env injection flows.
-6. Retire the old install after validation.
+1. Install autho: `bun install -g autho`
+2. Prepare a JSON backup in the format above.
+3. Initialize a new Bun vault.
+4. Import the JSON backup.
+5. Verify secrets, OTPs, and file workflows.
+6. Update automation to use the Bun CLI, daemon, and env injection flows.
+7. Retire the old install after validation.
 
 Example:
+
+```bash
+autho init --vault ./.autho/vault.db --password "correct horse battery staple"
+autho import legacy --vault ./.autho/vault.db --password "correct horse battery staple" --file ./legacy-backup.json --json
+autho secrets list --vault ./.autho/vault.db --password "correct horse battery staple" --json
+```
+
+Or from a local checkout:
 
 ```bash
 bun run autho -- init --vault ./.autho/vault.db --password "correct horse battery staple"
@@ -73,11 +82,11 @@ A one-off exporter is reasonable if needed, but it should stay outside the main 
 
 After import, verify:
 
-- `bun run autho -- secrets list --password "..." --json`
-- `bun run autho -- secrets get --password "..." --ref <name> --json`
-- `bun run autho -- otp code --password "..." --ref <name> --json`
-- `bun run autho -- file encrypt --password "..." --input ./sample.txt`
-- `bun run autho -- files encrypt --password "..." --input ./folder`
+- `autho secrets list --password "..." --json`
+- `autho secrets get --password "..." --ref <name> --json`
+- `autho otp code --password "..." --ref <name> --json`
+- `autho file encrypt --password "..." --input ./sample.txt`
+- `autho files encrypt --password "..." --input ./folder`
 
 ## Operational Notes
 
