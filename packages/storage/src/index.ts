@@ -1,0 +1,243 @@
+import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+
+import type { VaultConfig } from "../../crypto/src/index.ts";
+
+export type SecretRow = {
+  createdAt: string;
+  id: string;
+  name: string;
+  payload: string;
+  type: string;
+  updatedAt: string;
+  wrappedKey: string;
+};
+
+export type LeaseRow = {
+  createdAt: string;
+  expiresAt: string;
+  id: string;
+  name: string;
+  revokedAt: string | null;
+  secretRefs: string;
+};
+
+export type AuditRow = {
+  createdAt: string;
+  eventType: string;
+  id: string;
+  message: string;
+  metadata: string;
+  subjectRef: string | null;
+  subjectType: string;
+};
+
+function parseJson<T>(value: string): T {
+  return JSON.parse(value) as T;
+}
+
+export class AuthoDatabase {
+  private readonly db: Database;
+
+  constructor(private readonly vaultPath: string) {
+    if (vaultPath !== ":memory:") {
+      mkdirSync(dirname(vaultPath), { recursive: true });
+    }
+
+    this.db = new Database(vaultPath, { create: true, strict: true });
+    this.migrate();
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
+  private migrate(): void {
+    this.db.exec(`
+      PRAGMA journal_mode = WAL;
+
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS secrets (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        wrapped_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS leases (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        secret_refs TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS audit_events (
+        id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        subject_type TEXT NOT NULL,
+        subject_ref TEXT,
+        message TEXT NOT NULL,
+        metadata TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+  }
+
+  getVaultConfig(): VaultConfig | null {
+    const row = this.db
+      .query("SELECT value FROM meta WHERE key = ?1")
+      .get("vault.config") as { value: string } | null;
+
+    return row ? parseJson<VaultConfig>(row.value) : null;
+  }
+
+  setVaultConfig(config: VaultConfig): void {
+    this.db
+      .query("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")
+      .run("vault.config", JSON.stringify(config));
+  }
+
+  insertSecret(secret: SecretRow): void {
+    this.db
+      .query(
+        `INSERT INTO secrets (id, name, type, payload, wrapped_key, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+      )
+      .run(
+        secret.id,
+        secret.name,
+        secret.type,
+        secret.payload,
+        secret.wrappedKey,
+        secret.createdAt,
+        secret.updatedAt,
+      );
+  }
+
+  listSecrets(): SecretRow[] {
+    return this.db
+      .query(
+        `SELECT
+           id,
+           name,
+           type,
+           payload,
+           wrapped_key AS wrappedKey,
+           created_at AS createdAt,
+           updated_at AS updatedAt
+         FROM secrets
+         ORDER BY created_at ASC`,
+      )
+      .all() as SecretRow[];
+  }
+
+  findSecret(ref: string): SecretRow | null {
+    const row = this.db
+      .query(
+        `SELECT
+           id,
+           name,
+           type,
+           payload,
+           wrapped_key AS wrappedKey,
+           created_at AS createdAt,
+           updated_at AS updatedAt
+         FROM secrets
+         WHERE id = ?1 OR name = ?1
+         LIMIT 1`,
+      )
+      .get(ref) as SecretRow | null;
+
+    return row ?? null;
+  }
+
+  deleteSecret(id: string): void {
+    this.db.query("DELETE FROM secrets WHERE id = ?1").run(id);
+  }
+
+  insertLease(lease: LeaseRow): void {
+    this.db
+      .query(
+        `INSERT INTO leases (id, name, secret_refs, expires_at, revoked_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+      )
+      .run(
+        lease.id,
+        lease.name,
+        lease.secretRefs,
+        lease.expiresAt,
+        lease.revokedAt,
+        lease.createdAt,
+      );
+  }
+
+  findLease(id: string): LeaseRow | null {
+    const row = this.db
+      .query(
+        `SELECT
+           id,
+           name,
+           secret_refs AS secretRefs,
+           expires_at AS expiresAt,
+           revoked_at AS revokedAt,
+           created_at AS createdAt
+         FROM leases
+         WHERE id = ?1
+         LIMIT 1`,
+      )
+      .get(id) as LeaseRow | null;
+
+    return row ?? null;
+  }
+
+  revokeLease(id: string, revokedAt: string): void {
+    this.db
+      .query("UPDATE leases SET revoked_at = ?2 WHERE id = ?1")
+      .run(id, revokedAt);
+  }
+
+  insertAudit(event: AuditRow): void {
+    this.db
+      .query(
+        `INSERT INTO audit_events (id, event_type, subject_type, subject_ref, message, metadata, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+      )
+      .run(
+        event.id,
+        event.eventType,
+        event.subjectType,
+        event.subjectRef,
+        event.message,
+        event.metadata,
+        event.createdAt,
+      );
+  }
+
+  listAudit(limit: number): AuditRow[] {
+    return this.db
+      .query(
+        `SELECT
+           id,
+           event_type AS eventType,
+           subject_type AS subjectType,
+           subject_ref AS subjectRef,
+           message,
+           metadata,
+           created_at AS createdAt
+         FROM audit_events
+         ORDER BY created_at DESC
+         LIMIT ?1`,
+      )
+      .all(limit) as AuditRow[];
+  }
+}
