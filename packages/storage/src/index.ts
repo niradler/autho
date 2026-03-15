@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 import type { VaultConfig } from "../../crypto/src/index.ts";
@@ -37,20 +37,47 @@ function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
 }
 
+function tryChmod(path: string, mode: number): void {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  try {
+    chmodSync(path, mode);
+  } catch {
+    // best-effort hardening only
+  }
+}
+
 export class AuthoDatabase {
   private readonly db: Database;
 
   constructor(private readonly vaultPath: string) {
     if (vaultPath !== ":memory:") {
-      mkdirSync(dirname(vaultPath), { recursive: true });
+      mkdirSync(dirname(vaultPath), { mode: 0o700, recursive: true });
+      tryChmod(dirname(vaultPath), 0o700);
     }
 
     this.db = new Database(vaultPath, { create: true, strict: true });
     this.migrate();
+    this.hardenStorageFiles();
   }
 
   close(): void {
+    this.hardenStorageFiles();
     this.db.close();
+  }
+
+  private hardenStorageFiles(): void {
+    if (this.vaultPath === ":memory:") {
+      return;
+    }
+
+    for (const path of [this.vaultPath, `${this.vaultPath}-shm`, `${this.vaultPath}-wal`]) {
+      if (existsSync(path)) {
+        tryChmod(path, 0o600);
+      }
+    }
   }
 
   private migrate(): void {

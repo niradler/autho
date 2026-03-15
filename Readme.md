@@ -40,6 +40,8 @@ bun run hooks:install
 bun run autho -- init --password "correct horse battery staple"
 ```
 
+By default, Autho stores runtime state in `~/.autho`. For tests or isolated environments you can override that with `AUTHO_HOME`.
+
 Run the interactive prompt:
 
 ```bash
@@ -152,3 +154,4 @@ bun test
 ## Current Scope
 
 This release is intended to be stable for local-first Bun usage and parity with the legacy vault workflows. Planned future work such as proxy mode, richer agent policy management, and a fuller dashboard remains tracked in [plan.md](./plan.md) and is not part of this release cut.
+

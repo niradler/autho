@@ -1,15 +1,31 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 
 import { AuthoDatabase } from "../../storage/src/index.ts";
 import { randomId, unlockRootKey } from "../../crypto/src/index.ts";
 import { VaultSession, type EnvMapping, type VaultStatus } from "./index.ts";
+import { defaultDaemonStatePath, writeTextFileSecure } from "./paths.ts";
+
+const DAEMON_TOKEN_SERVICE = "autho.daemon";
+
+type StoredDaemonState = {
+  pid: number;
+  port: number;
+  startedAt: string;
+  token?: string;
+  tokenName?: string;
+  tokenStorage?: "file" | "os";
+  vaultPath: string;
+  version: 1;
+};
 
 export type DaemonState = {
   pid: number;
   port: number;
   startedAt: string;
-  token: string;
+  token: string | null;
+  tokenName: string | null;
+  tokenStorage: "file" | "os";
   vaultPath: string;
   version: 1;
 };
@@ -21,8 +37,81 @@ export type DaemonSession = {
   vaultPath: string;
 };
 
-export function defaultDaemonStatePath(cwd = process.cwd()): string {
-  return `${cwd}/.autho/daemon.json`.replace(/\\/g, "/");
+export { defaultDaemonStatePath } from "./paths.ts";
+
+function daemonTokenName(statePath: string): string {
+  return createHash("sha256").update(statePath).digest("hex");
+}
+
+async function storeDaemonToken(statePath: string, token: string): Promise<{
+  token: string | null;
+  tokenName: string | null;
+  tokenStorage: "file" | "os";
+}> {
+  const tokenName = daemonTokenName(statePath);
+
+  if (process.env.AUTHO_DISABLE_OS_SECRETS !== "1") {
+    try {
+      await Bun.secrets.set({
+        name: tokenName,
+        service: DAEMON_TOKEN_SERVICE,
+        value: token,
+      });
+      return {
+        token: null,
+        tokenName,
+        tokenStorage: "os",
+      };
+    } catch {
+      // fall back to file state when no OS secret backend is available
+    }
+  }
+
+  return {
+    token,
+    tokenName: null,
+    tokenStorage: "file",
+  };
+}
+
+async function resolveDaemonToken(state: DaemonState): Promise<string> {
+  if (state.tokenStorage === "os") {
+    if (!state.tokenName) {
+      throw new Error("Daemon state is missing tokenName for OS secret storage");
+    }
+
+    const token = await Bun.secrets.get({
+      name: state.tokenName,
+      service: DAEMON_TOKEN_SERVICE,
+    });
+
+    if (!token) {
+      throw new Error("Daemon token not found in OS secret storage");
+    }
+
+    return token;
+  }
+
+  if (!state.token) {
+    throw new Error("Daemon state is missing token");
+  }
+
+  return state.token;
+}
+
+async function deleteStoredDaemonToken(state: DaemonState | null): Promise<void> {
+  if (!state || state.tokenStorage !== "os" || !state.tokenName) {
+    return;
+  }
+
+  try {
+    await Bun.secrets.delete({
+      name: state.tokenName,
+      service: DAEMON_TOKEN_SERVICE,
+    });
+  } catch {
+    // best effort cleanup only
+  }
 }
 
 export function readDaemonState(statePath: string): DaemonState | null {
@@ -30,15 +119,47 @@ export function readDaemonState(statePath: string): DaemonState | null {
     return null;
   }
 
-  return JSON.parse(readFileSync(statePath, "utf8")) as DaemonState;
+  const stored = JSON.parse(readFileSync(statePath, "utf8")) as StoredDaemonState;
+  return {
+    pid: stored.pid,
+    port: stored.port,
+    startedAt: stored.startedAt,
+    token: stored.token ?? null,
+    tokenName: stored.tokenName ?? null,
+    tokenStorage: stored.tokenStorage ?? (stored.token ? "file" : "os"),
+    vaultPath: stored.vaultPath,
+    version: stored.version,
+  };
 }
 
-export function writeDaemonState(statePath: string, state: DaemonState): void {
-  mkdirSync(dirname(statePath), { recursive: true });
-  writeFileSync(statePath, JSON.stringify(state, null, 2) + "\n", "utf8");
+export async function writeDaemonState(
+  statePath: string,
+  state: Omit<DaemonState, "token" | "tokenName" | "tokenStorage"> & { token: string },
+): Promise<void> {
+  const tokenState = await storeDaemonToken(statePath, state.token);
+  writeTextFileSecure(
+    statePath,
+    JSON.stringify(
+      {
+        pid: state.pid,
+        port: state.port,
+        startedAt: state.startedAt,
+        token: tokenState.token ?? undefined,
+        tokenName: tokenState.tokenName ?? undefined,
+        tokenStorage: tokenState.tokenStorage,
+        vaultPath: state.vaultPath,
+        version: state.version,
+      } satisfies StoredDaemonState,
+      null,
+      2,
+    ) + "\n",
+  );
 }
 
-export function deleteDaemonState(statePath: string): void {
+export async function deleteDaemonState(statePath: string): Promise<void> {
+  const state = readDaemonState(statePath);
+  await deleteStoredDaemonToken(state);
+
   if (existsSync(statePath)) {
     rmSync(statePath, { force: true });
   }
@@ -116,7 +237,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
   let server: Bun.Server | null = null;
 
   const shutdown = (): void => {
-    deleteDaemonState(options.statePath);
+    void deleteDaemonState(options.statePath);
     server?.stop(true);
   };
 
@@ -253,7 +374,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
     port: options.port,
   });
 
-  writeDaemonState(options.statePath, {
+  await writeDaemonState(options.statePath, {
     pid: process.pid,
     port: server.port,
     startedAt,
@@ -274,11 +395,22 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
   });
 }
 
+async function waitForDaemonStateDeletion(statePath: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (!existsSync(statePath)) {
+      return true;
+    }
+    await Bun.sleep(25);
+  }
+
+  return !existsSync(statePath);
+}
 async function daemonRequest<T>(state: DaemonState, path: string, body: unknown): Promise<T> {
+  const token = await resolveDaemonToken(state);
   const response = await fetch(`http://127.0.0.1:${state.port}${path}`, {
     body: JSON.stringify(body ?? {}),
     headers: {
-      authorization: `Bearer ${state.token}`,
+      authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
     method: "POST",
@@ -344,13 +476,14 @@ export async function daemonStop(options: DaemonClientOptions): Promise<{ ok: tr
   }
 
   try {
-    return await daemonRequest(state, "/shutdown", {});
+    const result = await daemonRequest(state, "/shutdown", {});
+    await waitForDaemonStateDeletion(options.statePath);
+    return result;
   } catch (error) {
-    if (!existsSync(options.statePath)) {
+    if (await waitForDaemonStateDeletion(options.statePath)) {
       return { ok: true, stopped: true };
     }
     throw error;
   }
 }
-
 

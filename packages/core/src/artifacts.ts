@@ -1,18 +1,22 @@
 import { randomBytes } from "node:crypto";
 import {
-  mkdirSync,
   readdirSync,
   readFileSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 
 import {
   decryptWithKey,
   encryptWithKey,
   type EncryptedBlob,
 } from "../../crypto/src/index.ts";
+import {
+  ensurePrivateDir,
+  ensurePrivateParent,
+  writeBinaryFileSecure,
+  writeTextFileSecure,
+} from "./paths.ts";
 
 type FileEnvelope = {
   kind: "file";
@@ -92,8 +96,7 @@ export function encryptFileArtifact(inputPath: string, outputPath: string, rootK
     wrappedKey: encryptWithKey(fileKey, rootKey, "autho:file:dek"),
   };
 
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, JSON.stringify(envelope, null, 2), "utf8");
+  writeTextFileSecure(outputPath, JSON.stringify(envelope, null, 2));
 
   return { outputPath };
 }
@@ -113,8 +116,7 @@ export function decryptFileArtifact(inputPath: string, outputPath: string, rootK
     `autho:file:${envelope.originalName}`,
   );
 
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, content);
+  writeBinaryFileSecure(outputPath, content);
 
   return { outputPath };
 }
@@ -145,8 +147,7 @@ export function encryptFolderArtifact(inputPath: string, outputPath: string, roo
     wrappedKey: encryptWithKey(folderKey, rootKey, `autho:folder:dek:${rootName}`),
   };
 
-  mkdirSync(dirname(outputPath), { recursive: true });
-  writeFileSync(outputPath, JSON.stringify(envelope, null, 2), "utf8");
+  writeTextFileSecure(outputPath, JSON.stringify(envelope, null, 2));
 
   return {
     fileCount: envelope.entries.length,
@@ -169,16 +170,16 @@ export function decryptFolderArtifact(inputPath: string, outputPath: string, roo
     `autho:folder:dek:${envelope.rootName}`,
   );
 
-  mkdirSync(outputPath, { recursive: true });
+  ensurePrivateDir(outputPath);
   for (const entry of envelope.entries) {
     const destination = join(outputPath, entry.path);
-    mkdirSync(dirname(destination), { recursive: true });
+    ensurePrivateParent(destination);
     const content = decryptWithKey(
       entry.payload,
       folderKey,
       `autho:folder:${entry.path}`,
     );
-    writeFileSync(destination, content);
+    writeBinaryFileSecure(destination, content);
   }
 
   return {
