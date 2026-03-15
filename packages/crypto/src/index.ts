@@ -32,7 +32,7 @@ const DEFAULT_KDF: VaultKdfConfig = {
   keyLength: 32,
   name: "scrypt",
   salt: "",
-  N: 1 << 14,
+  N: 1 << 17,
   p: 1,
   r: 8,
 };
@@ -50,7 +50,7 @@ export function deriveKeyFromPassword(
   config: VaultKdfConfig,
 ): Buffer {
   return scryptSync(password, Buffer.from(config.salt, "base64"), config.keyLength, {
-    maxmem: 64 * 1024 * 1024,
+    maxmem: 256 * 1024 * 1024,
     N: config.N,
     p: config.p,
     r: config.r,
