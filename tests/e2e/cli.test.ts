@@ -12,10 +12,14 @@ import { describe, expect, test } from "bun:test";
 
 const repoRoot = join(import.meta.dir, "..", "..");
 
-function runCli(args: string[]) {
+function runCli(args: string[], env?: Record<string, string>) {
   const result = Bun.spawnSync({
     cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
     cwd: repoRoot,
+    env: {
+      ...process.env,
+      ...(env ?? {}),
+    },
     stderr: "pipe",
     stdout: "pipe",
   });
@@ -27,8 +31,32 @@ function runCli(args: string[]) {
   };
 }
 
-function runCliJson(args: string[]) {
-  const result = runCli([...args, "--json"]);
+async function runCliInteractive(args: string[], input: string, env?: Record<string, string>) {
+  const processRef = Bun.spawn({
+    cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      ...(env ?? {}),
+    },
+    stdin: "pipe",
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+
+  processRef.stdin.write(input);
+  processRef.stdin.end();
+  const exitCode = await processRef.exited;
+
+  return {
+    exitCode,
+    stderr: await new Response(processRef.stderr).text(),
+    stdout: await new Response(processRef.stdout).text(),
+  };
+}
+
+function runCliJson(args: string[], env?: Record<string, string>) {
+  const result = runCli([...args, "--json"], env);
   expect(result.exitCode).toBe(0);
 
   return JSON.parse(result.stdout) as unknown;
@@ -45,6 +73,10 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 5000
   throw new Error("Timed out waiting for condition");
 }
 
+function cookieHeader(setCookie: string | null): string {
+  return (setCookie ?? "").split(";")[0] ?? "";
+}
+
 describe("autho rewrite CLI", () => {
   test("covers init, project config, status, secret CRUD, otp, lease, env, exec, audit, and revoke flows", () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "autho-e2e-"));
@@ -52,9 +84,7 @@ describe("autho rewrite CLI", () => {
     const projectFile = join(tempRoot, ".autho", "project.json");
     const password = "correct horse battery staple";
 
-    expect(
-      runCli(["init", "--vault", vaultPath, "--password", password]).exitCode,
-    ).toBe(0);
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
 
     const projectInit = runCliJson([
       "project",
@@ -265,18 +295,7 @@ describe("autho rewrite CLI", () => {
     expect(execResult.exitCode).toBe(0);
     expect(execResult.stdout).toBe("ghp_example_secret:ship the rewrite");
 
-    expect(
-      runCli([
-        "lease",
-        "revoke",
-        "--vault",
-        vaultPath,
-        "--password",
-        password,
-        "--lease",
-        lease.id,
-      ]).exitCode,
-    ).toBe(0);
+    expect(runCli(["lease", "revoke", "--vault", vaultPath, "--password", password, "--lease", lease.id]).exitCode).toBe(0);
 
     const rejected = runCli([
       "env",
@@ -327,6 +346,47 @@ describe("autho rewrite CLI", () => {
       passwordSecret.id,
     ]) as { name: string };
     expect(remove.name).toBe("github");
+  });
+
+  test("covers interactive prompt mode for create and list flows", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-prompt-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const password = "correct horse battery staple";
+
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
+
+    const createResult = await runCliInteractive(
+      ["prompt", "--vault", vaultPath],
+      [
+        "create",
+        "prompt-secret",
+        "note",
+        "created from prompt",
+        "prompt description",
+      ].join("\n") + "\n",
+      { AUTHO_MASTER_PASSWORD: password },
+    );
+    expect(createResult.exitCode).toBe(0);
+
+    const createdSecret = runCliJson([
+      "secrets",
+      "get",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--ref",
+      "prompt-secret",
+    ]) as { value: string };
+    expect(createdSecret.value).toBe("created from prompt");
+
+    const listResult = await runCliInteractive(
+      ["--vault", vaultPath],
+      "list\n",
+      { AUTHO_MASTER_PASSWORD: password },
+    );
+    expect(listResult.exitCode).toBe(0);
+    expect(listResult.stdout).toContain("prompt-secret");
   });
 
   test("covers legacy import and secure file or folder encryption flows", () => {
@@ -499,59 +559,12 @@ describe("autho rewrite CLI", () => {
     const password = "correct horse battery staple";
 
     expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
-    runCliJson([
-      "project",
-      "init",
-      "--output",
-      projectFile,
-      "--map",
-      "AUTHO_PASSWORD=github",
-      "--map",
-      "AUTHO_NOTE=memo",
-      "--force",
-    ]);
-    runCliJson([
-      "secrets",
-      "add",
-      "--vault",
-      vaultPath,
-      "--password",
-      password,
-      "--name",
-      "github",
-      "--type",
-      "password",
-      "--value",
-      "ghp_example_secret",
-    ]);
-    runCliJson([
-      "secrets",
-      "add",
-      "--vault",
-      vaultPath,
-      "--password",
-      password,
-      "--name",
-      "memo",
-      "--type",
-      "note",
-      "--value",
-      "ship the rewrite",
-    ]);
+    runCliJson(["project", "init", "--output", projectFile, "--map", "AUTHO_PASSWORD=github", "--map", "AUTHO_NOTE=memo", "--force"]);
+    runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "github", "--type", "password", "--value", "ghp_example_secret"]);
+    runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "memo", "--type", "note", "--value", "ship the rewrite"]);
 
     const daemon = Bun.spawn({
-      cmd: [
-        "bun",
-        "run",
-        "./apps/daemon/src/index.ts",
-        "serve",
-        "--vault",
-        vaultPath,
-        "--state-file",
-        stateFile,
-        "--port",
-        "0",
-      ],
+      cmd: ["bun", "run", "./apps/daemon/src/index.ts", "serve", "--vault", vaultPath, "--state-file", stateFile, "--port", "0"],
       cwd: repoRoot,
       stderr: "pipe",
       stdout: "pipe",
@@ -561,39 +574,15 @@ describe("autho rewrite CLI", () => {
       await waitFor(() => existsSync(stateFile));
       await waitFor(() => runCli(["daemon", "status", "--state-file", stateFile]).exitCode === 0);
 
-      const daemonStatus = runCliJson([
-        "daemon",
-        "status",
-        "--state-file",
-        stateFile,
-      ]) as { activeSessions: number; status: { initialized: boolean } };
+      const daemonStatus = runCliJson(["daemon", "status", "--state-file", stateFile]) as { activeSessions: number; status: { initialized: boolean } };
       expect(daemonStatus.activeSessions).toBe(0);
       expect(daemonStatus.status.initialized).toBe(true);
 
-      const unlocked = runCliJson([
-        "daemon",
-        "unlock",
-        "--state-file",
-        stateFile,
-        "--password",
-        password,
-        "--ttl",
-        "120",
-      ]) as { expiresAt: string; sessionId: string };
+      const unlocked = runCliJson(["daemon", "unlock", "--state-file", stateFile, "--password", password, "--ttl", "120"]) as { expiresAt: string; sessionId: string };
       expect(unlocked.sessionId.length).toBeGreaterThan(10);
       expect(unlocked.expiresAt).toContain("T");
 
-      const envRender = runCliJson([
-        "daemon",
-        "env",
-        "render",
-        "--state-file",
-        stateFile,
-        "--session",
-        unlocked.sessionId,
-        "--project-file",
-        projectFile,
-      ]) as Record<string, string>;
+      const envRender = runCliJson(["daemon", "env", "render", "--state-file", stateFile, "--session", unlocked.sessionId, "--project-file", projectFile]) as Record<string, string>;
       expect(envRender.AUTHO_PASSWORD).toBe("ghp_example_secret");
       expect(envRender.AUTHO_NOTE).toBe("ship the rewrite");
 
@@ -614,28 +603,9 @@ describe("autho rewrite CLI", () => {
       expect(execResult.exitCode).toBe(0);
       expect(execResult.stdout).toBe("ghp_example_secret:ship the rewrite");
 
-      expect(
-        runCli([
-          "daemon",
-          "lock",
-          "--state-file",
-          stateFile,
-          "--session",
-          unlocked.sessionId,
-        ]).exitCode,
-      ).toBe(0);
+      expect(runCli(["daemon", "lock", "--state-file", stateFile, "--session", unlocked.sessionId]).exitCode).toBe(0);
 
-      const lockedEnv = runCli([
-        "daemon",
-        "env",
-        "render",
-        "--state-file",
-        stateFile,
-        "--session",
-        unlocked.sessionId,
-        "--project-file",
-        projectFile,
-      ]);
+      const lockedEnv = runCli(["daemon", "env", "render", "--state-file", stateFile, "--session", unlocked.sessionId, "--project-file", projectFile]);
       expect(lockedEnv.exitCode).toBe(1);
       expect(lockedEnv.stderr).toContain("Unknown daemon session");
 
@@ -646,4 +616,94 @@ describe("autho rewrite CLI", () => {
       await daemon.exited;
     }
   });
+
+  test("covers local web unlock and secret api flows", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-web-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const password = "correct horse battery staple";
+    const port = 18000 + Math.floor(Math.random() * 1000);
+
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
+    runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "github", "--type", "password", "--value", "ghp_example_secret"]);
+
+    const web = Bun.spawn({
+      cmd: ["bun", "run", "./apps/web/src/index.ts", "serve", "--vault", vaultPath, "--port", String(port)],
+      cwd: repoRoot,
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+
+    try {
+      await waitFor(async () => {
+        try {
+          const response = await fetch(`http://127.0.0.1:${port}/health`);
+          return response.ok;
+        } catch {
+          return false;
+        }
+      });
+
+      const pageResponse = await fetch(`http://127.0.0.1:${port}/`);
+      expect(pageResponse.status).toBe(200);
+      expect(await pageResponse.text()).toContain("Autho Local Web");
+
+      const unlockResponse = await fetch(`http://127.0.0.1:${port}/api/session/unlock`, {
+        body: JSON.stringify({ password }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      expect(unlockResponse.status).toBe(200);
+      const cookie = cookieHeader(unlockResponse.headers.get("set-cookie"));
+      expect(cookie).toContain("autho_session=");
+
+      const statusResponse = await fetch(`http://127.0.0.1:${port}/api/status`, {
+        headers: { cookie },
+      });
+      expect(statusResponse.status).toBe(200);
+      const statusBody = (await statusResponse.json()) as { secretCount: number };
+      expect(statusBody.secretCount).toBe(1);
+
+      const listResponse = await fetch(`http://127.0.0.1:${port}/api/secrets`, {
+        headers: { cookie },
+      });
+      expect(listResponse.status).toBe(200);
+      const listed = (await listResponse.json()) as { data: Array<{ name: string }> };
+      expect(listed.data[0].name).toBe("github");
+
+      const createResponse = await fetch(`http://127.0.0.1:${port}/api/secrets`, {
+        body: JSON.stringify({ name: "memo", type: "note", value: "web note" }),
+        headers: { "content-type": "application/json", cookie },
+        method: "POST",
+      });
+      expect(createResponse.status).toBe(201);
+
+      const getResponse = await fetch(`http://127.0.0.1:${port}/api/secrets/memo`, {
+        headers: { cookie },
+      });
+      expect(getResponse.status).toBe(200);
+      const secret = (await getResponse.json()) as { data: { value: string } };
+      expect(secret.data.value).toBe("web note");
+
+      const deleteResponse = await fetch(`http://127.0.0.1:${port}/api/secrets/memo`, {
+        headers: { cookie },
+        method: "DELETE",
+      });
+      expect(deleteResponse.status).toBe(200);
+
+      const lockResponse = await fetch(`http://127.0.0.1:${port}/api/session/lock`, {
+        headers: { cookie },
+        method: "POST",
+      });
+      expect(lockResponse.status).toBe(200);
+
+      const unauthorized = await fetch(`http://127.0.0.1:${port}/api/secrets`, {
+        headers: { cookie },
+      });
+      expect(unauthorized.status).toBe(401);
+    } finally {
+      web.kill();
+      await web.exited;
+    }
+  });
 });
+

@@ -384,8 +384,10 @@ The current implementation pass should establish:
 
 - a Bun-based workspace that can run, test, and bundle locally without pnpm-specific tooling
 - a secure local vault foundation using envelope encryption and SQLite
-- a CLI slice that covers vault setup, secret CRUD, OTP generation, legacy JSON import, file and folder encryption, env injection, env-file sync, `exec`, and audit visibility
-- end-to-end tests that mimic user behavior through the CLI on disk, not only in-memory service tests
+- a CLI slice that covers vault setup, secret CRUD, OTP generation, legacy JSON import, file and folder encryption, env injection, env-file sync, `exec`, daemon workflows, and audit visibility
+- a documented migration path for this release based on legacy JSON import plus manual or external export for uncommon `conf`-store installs
+- end-to-end tests that mimic user behavior through the CLI and local service boundaries instead of only in-memory service tests
+- removal of the old pnpm-era implementation from the working tree only after Bun parity is verified
 
 ## Definition Of Done For The Rewrite
 
@@ -398,3 +400,4 @@ The rewrite should be considered successful when:
 - audit logs and revocation exist for all agent secret access
 - Autho can be run locally without external infrastructure
 - the codebase is typed, tested, and structured for future iteration
+

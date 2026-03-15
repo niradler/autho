@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
 
 import {
@@ -91,8 +93,8 @@ function required(value: string | undefined, label: string): string {
   return value;
 }
 
-function output(value: unknown, json = false): void {
-  if (json) {
+function output(value: unknown, jsonMode = false): void {
+  if (jsonMode) {
     console.log(JSON.stringify(value, null, 2));
     return;
   }
@@ -125,14 +127,171 @@ function buildSecretMetadata(args: ParsedArgs): Record<string, unknown> {
   );
 }
 
+type PromptAdapter = {
+  ask(prompt: string): Promise<string>;
+  close(): void;
+};
+
+async function readBufferedStdin(): Promise<string[]> {
+  process.stdin.setEncoding("utf8");
+  let input = "";
+  for await (const chunk of process.stdin) {
+    input += chunk;
+  }
+  return input.split(/\r?\n/);
+}
+
+async function createPromptAdapter(): Promise<PromptAdapter> {
+  if (process.stdin.isTTY) {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    return {
+      ask: async (prompt: string) => (await rl.question(prompt)).trim(),
+      close: () => rl.close(),
+    };
+  }
+
+  const answers = await readBufferedStdin();
+  let index = 0;
+
+  return {
+    ask: async (prompt: string) => {
+      process.stdout.write(prompt);
+      const value = answers[index] ?? "";
+      index += 1;
+      return value.trim();
+    },
+    close: () => undefined,
+  };
+}
+
+async function askPassword(prompt: PromptAdapter, initial?: string): Promise<string> {
+  if (initial) {
+    return initial;
+  }
+
+  return prompt.ask("Master password: ");
+}
+
+async function runPromptMode(vaultPath: string, initialPassword?: string): Promise<void> {
+  const prompt = await createPromptAdapter();
+
+  try {
+    const password = await askPassword(prompt, initialPassword);
+    const session = VaultService.unlock(vaultPath, password);
+    try {
+      const action = (await prompt.ask("Action [create/read/list/delete/otp/exit]: ")).toLowerCase();
+
+      if (action === "exit") {
+        return;
+      }
+
+      if (action === "list") {
+        output(session.listSecrets());
+        return;
+      }
+
+      if (action === "read") {
+        const ref = await prompt.ask("Secret ref: ");
+        output(session.getSecret(ref));
+        return;
+      }
+
+      if (action === "delete") {
+        const ref = await prompt.ask("Secret ref: ");
+        output(session.removeSecret(ref));
+        return;
+      }
+
+      if (action === "otp") {
+        const ref = await prompt.ask("OTP ref: ");
+        output(session.generateOtp(ref));
+        return;
+      }
+
+      if (action === "create") {
+        const name = await prompt.ask("Name: ");
+        const type = (await prompt.ask("Type [password/note/otp]: ")).toLowerCase();
+        const value = await prompt.ask("Value: ");
+        const username = type !== "note" ? await prompt.ask("Username (optional): ") : "";
+        const url = type === "password" ? await prompt.ask("URL (optional): ") : "";
+        const description = await prompt.ask("Description (optional): ");
+        const digits = type === "otp" ? await prompt.ask("Digits [6]: ") : "";
+        const algorithm = type === "otp" ? await prompt.ask("Algorithm [SHA1]: ") : "";
+
+        output(
+          session.addSecret({
+            metadata: Object.fromEntries(
+              Object.entries({
+                algorithm: algorithm || undefined,
+                description: description || undefined,
+                digits: digits ? Number(digits) : undefined,
+                url: url || undefined,
+              }).filter(([, entry]) => entry !== undefined),
+            ),
+            name,
+            type,
+            username: username || undefined,
+            value,
+          }),
+        );
+        return;
+      }
+
+      throw new Error(`Unknown prompt action: ${action}`);
+    } finally {
+      session.close();
+    }
+  } finally {
+    prompt.close();
+  }
+}
+async function runWebServer(vaultPath: string, args: ParsedArgs): Promise<void> {
+  const commandArgs = [
+    "run",
+    absolutePath("./apps/web/src/index.ts"),
+    "serve",
+    "--vault",
+    absolutePath(vaultPath),
+  ];
+
+  const host = getString(args, "host");
+  const port = getString(args, "port");
+  if (host) {
+    commandArgs.push("--host", host);
+  }
+  if (port) {
+    commandArgs.push("--port", port);
+  }
+
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, commandArgs, {
+      cwd: process.cwd(),
+      stdio: "inherit",
+    });
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+      rejectPromise(new Error(`Web server exited with code ${code ?? 1}`));
+    });
+    child.on("error", rejectPromise);
+  });
+}
+
 function help(): string {
   return [
-    "Autho rewrite CLI",
+    "Autho Bun CLI",
     "",
     "Commands:",
+    "  prompt [--password <value>] [--vault <path>]",
     "  init --password <value> [--vault <path>]",
     "  status [--password <value>] [--vault <path>] [--project-file <path>] [--json]",
     "  project init --map <ENV_NAME=secretRef> [--map <ENV_NAME=secretRef>] [--output <path>] [--force] [--json]",
+    "  web serve [--vault <path>] [--host <value>] [--port <value>]",
     "  daemon serve [--vault <path>] [--state-file <path>] [--host <value>] [--port <value>]",
     "  daemon status [--state-file <path>] [--json]",
     "  daemon unlock --password <value> [--ttl <seconds>] [--state-file <path>] [--json]",
@@ -158,10 +317,11 @@ function help(): string {
     "  audit list --password <value> [--limit <number>] [--vault <path>] [--json]",
     "",
     "Notes:",
-    "  The default vault path is ./.autho/vault.db",
-    "  The default project file is ./.autho/project.json when it exists",
-    "  The default daemon state file is ./.autho/daemon.json",
-    "  AUTHO_MASTER_PASSWORD can be used instead of --password",
+    "  Running `autho` with no command enters interactive prompt mode.",
+    "  The default vault path is ./.autho/vault.db.",
+    "  The default project file is ./.autho/project.json when it exists.",
+    "  The default daemon state file is ./.autho/daemon.json.",
+    "  AUTHO_MASTER_PASSWORD can be used instead of --password.",
   ].join("\n");
 }
 
@@ -176,8 +336,18 @@ async function main(): Promise<void> {
   const projectFile = explicitProjectFile ?? (existsSync(fallbackProjectFile) ? fallbackProjectFile : undefined);
   const password = getString(args, "password") ?? process.env.AUTHO_MASTER_PASSWORD;
 
-  if (!scope || scope === "help" || scope === "--help") {
+  if (!scope) {
+    await runPromptMode(vaultPath, password);
+    return;
+  }
+
+  if (scope === "help" || scope === "--help") {
     console.log(help());
+    return;
+  }
+
+  if (scope === "prompt") {
+    await runPromptMode(vaultPath, password);
     return;
   }
 
@@ -206,6 +376,11 @@ async function main(): Promise<void> {
       }),
       jsonMode,
     );
+    return;
+  }
+
+  if (scope === "web" && action === "serve") {
+    await runWebServer(vaultPath, args);
     return;
   }
 
