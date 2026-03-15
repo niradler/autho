@@ -35,29 +35,40 @@ function runCliJson(args: string[]) {
 }
 
 describe("autho rewrite CLI", () => {
-  test("covers init, secret CRUD, otp, lease, env, exec, audit, and revoke flows", () => {
+  test("covers init, project config, status, secret CRUD, otp, lease, env, exec, audit, and revoke flows", () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "autho-e2e-"));
     const vaultPath = join(tempRoot, ".autho", "vault.db");
-    const projectFile = join(tempRoot, "project.json");
+    const projectFile = join(tempRoot, ".autho", "project.json");
     const password = "correct horse battery staple";
-
-    writeFileSync(
-      projectFile,
-      JSON.stringify(
-        {
-          env: {
-            AUTHO_PASSWORD: "github",
-            AUTHO_NOTE: "memo",
-          },
-        },
-        null,
-        2,
-      ),
-    );
 
     expect(
       runCli(["init", "--vault", vaultPath, "--password", password]).exitCode,
     ).toBe(0);
+
+    const projectInit = runCliJson([
+      "project",
+      "init",
+      "--output",
+      projectFile,
+      "--map",
+      "AUTHO_PASSWORD=github",
+      "--map",
+      "AUTHO_NOTE=memo",
+      "--force",
+    ]) as { mappingCount: number; outputPath: string };
+    expect(projectInit.mappingCount).toBe(2);
+    expect(projectInit.outputPath).toBe(projectFile);
+
+    const initialStatus = runCliJson([
+      "status",
+      "--vault",
+      vaultPath,
+      "--project-file",
+      projectFile,
+    ]) as { initialized: boolean; projectMappings: string[]; unlocked: boolean };
+    expect(initialStatus.initialized).toBe(true);
+    expect(initialStatus.unlocked).toBe(false);
+    expect(initialStatus.projectMappings).toEqual(["AUTHO_PASSWORD", "AUTHO_NOTE"]);
 
     const passwordSecret = runCliJson([
       "secrets",
@@ -113,6 +124,27 @@ describe("autho rewrite CLI", () => {
       "--algorithm",
       "SHA1",
     ]);
+
+    const unlockedStatus = runCliJson([
+      "status",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--project-file",
+      projectFile,
+    ]) as {
+      activeLeaseCount: number;
+      initialized: boolean;
+      projectMappings: string[];
+      secretCount: number;
+      unlocked: boolean;
+    };
+    expect(unlockedStatus.initialized).toBe(true);
+    expect(unlockedStatus.unlocked).toBe(true);
+    expect(unlockedStatus.secretCount).toBe(3);
+    expect(unlockedStatus.activeLeaseCount).toBe(0);
+    expect(unlockedStatus.projectMappings).toEqual(["AUTHO_PASSWORD", "AUTHO_NOTE"]);
 
     const listed = runCliJson([
       "secrets",
@@ -212,15 +244,15 @@ describe("autho rewrite CLI", () => {
       password,
       "--lease",
       lease.id,
-      "--map",
-      "AUTHO_PASSWORD=github",
+      "--project-file",
+      projectFile,
       "--",
       "bun",
       "-e",
-      "process.stdout.write(process.env.AUTHO_PASSWORD ?? '')",
+      "process.stdout.write(process.env.AUTHO_PASSWORD + ':' + process.env.AUTHO_NOTE)",
     ]);
     expect(execResult.exitCode).toBe(0);
-    expect(execResult.stdout).toBe("ghp_example_secret");
+    expect(execResult.stdout).toBe("ghp_example_secret:ship the rewrite");
 
     expect(
       runCli([

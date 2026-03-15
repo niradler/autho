@@ -4,7 +4,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -59,6 +58,17 @@ export type AuditEvent = {
 export type EnvMapping = {
   envName: string;
   secretRef: string;
+};
+
+export type VaultStatus = {
+  activeLeaseCount: number;
+  auditEventCount: number;
+  initialized: boolean;
+  projectFile: string | null;
+  projectMappings: string[];
+  secretCount: number;
+  unlocked: boolean;
+  vaultPath: string;
 };
 
 type StoredSecretPayload = {
@@ -243,8 +253,26 @@ function quoteEnvValue(value: string): string {
   return JSON.stringify(value);
 }
 
+function projectMappingsForStatus(projectFile?: string): { path: string | null; mappings: string[] } {
+  if (!projectFile || !existsSync(projectFile)) {
+    return {
+      mappings: [],
+      path: projectFile ?? null,
+    };
+  }
+
+  return {
+    mappings: parseProjectMappings(projectFile).map((mapping) => mapping.envName),
+    path: projectFile,
+  };
+}
+
 export function defaultVaultPath(cwd = process.cwd()): string {
   return `${cwd}/.autho/vault.db`.replace(/\\/g, "/");
+}
+
+export function defaultProjectFilePath(cwd = process.cwd()): string {
+  return `${cwd}/.autho/project.json`.replace(/\\/g, "/");
 }
 
 export function resolveMappings(options: {
@@ -274,6 +302,40 @@ export function resolveMappings(options: {
   return fromMaps;
 }
 
+export function writeProjectConfig(input: {
+  force?: boolean;
+  mappings: EnvMapping[];
+  outputPath: string;
+}): { mappingCount: number; outputPath: string } {
+  if (input.mappings.length === 0) {
+    throw new Error("Provide at least one env mapping");
+  }
+  if (!input.force && existsSync(input.outputPath)) {
+    throw new Error(`Project config already exists: ${input.outputPath}`);
+  }
+
+  const env = Object.fromEntries(input.mappings.map((mapping) => [mapping.envName, mapping.secretRef]));
+  mkdirSync(dirname(input.outputPath), { recursive: true });
+  writeFileSync(
+    input.outputPath,
+    JSON.stringify(
+      {
+        env,
+        generatedAt: new Date().toISOString(),
+        version: 1,
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+
+  return {
+    mappingCount: input.mappings.length,
+    outputPath: input.outputPath,
+  };
+}
+
 export class VaultService {
   static initialize(vaultPath: string, password: string): { vaultPath: string } {
     const db = new AuthoDatabase(vaultPath);
@@ -296,6 +358,46 @@ export class VaultService {
       });
 
       return { vaultPath };
+    } finally {
+      db.close();
+    }
+  }
+
+  static status(vaultPath: string, options?: { password?: string; projectFile?: string }): VaultStatus {
+    const db = new AuthoDatabase(vaultPath);
+
+    try {
+      const config = db.getVaultConfig();
+      const project = projectMappingsForStatus(options?.projectFile);
+      if (!config) {
+        return {
+          activeLeaseCount: 0,
+          auditEventCount: 0,
+          initialized: false,
+          projectFile: project.path,
+          projectMappings: project.mappings,
+          secretCount: 0,
+          unlocked: false,
+          vaultPath,
+        };
+      }
+
+      if (!options?.password) {
+        return {
+          activeLeaseCount: 0,
+          auditEventCount: 0,
+          initialized: true,
+          projectFile: project.path,
+          projectMappings: project.mappings,
+          secretCount: 0,
+          unlocked: false,
+          vaultPath,
+        };
+      }
+
+      const rootKey = unlockRootKey(options.password, config);
+      const session = new VaultSession(db, rootKey);
+      return session.status(vaultPath, project.path, project.mappings);
     } finally {
       db.close();
     }
@@ -327,6 +429,19 @@ export class VaultSession {
 
   close(): void {
     this.db.close();
+  }
+
+  status(vaultPath: string, projectFile?: string | null, projectMappings: string[] = []): VaultStatus {
+    return {
+      activeLeaseCount: this.db.countActiveLeases(new Date().toISOString()),
+      auditEventCount: this.db.countAuditEvents(),
+      initialized: true,
+      projectFile: projectFile ?? null,
+      projectMappings,
+      secretCount: this.db.countSecrets(),
+      unlocked: true,
+      vaultPath,
+    };
   }
 
   private audit(
@@ -768,3 +883,4 @@ export class VaultSession {
     return this.db.listAudit(limit).map(toAuditEvent);
   }
 }
+
