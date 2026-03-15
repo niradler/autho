@@ -1,0 +1,49 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "autho",
+    },
+    "apps/cli": {
+      "name": "autho",
+      "version": "0.2.0",
+      "bin": {
+        "autho": "./dist/autho.js",
+      },
+    },
+    "apps/daemon": {
+      "name": "@autho/daemon",
+      "version": "0.0.0",
+    },
+    "apps/web": {
+      "name": "@autho/web",
+      "version": "0.0.0",
+    },
+    "packages/core": {
+      "name": "@autho/core",
+      "version": "0.0.0",
+    },
+    "packages/crypto": {
+      "name": "@autho/crypto",
+      "version": "0.0.0",
+    },
+    "packages/storage": {
+      "name": "@autho/storage",
+      "version": "0.0.0",
+    },
+  },
+  "packages": {
+    "@autho/core": ["@autho/core@workspace:packages/core"],
+
+    "@autho/crypto": ["@autho/crypto@workspace:packages/crypto"],
+
+    "@autho/daemon": ["@autho/daemon@workspace:apps/daemon"],
+
+    "@autho/storage": ["@autho/storage@workspace:packages/storage"],
+
+    "@autho/web": ["@autho/web@workspace:apps/web"],
+
+    "autho": ["autho@workspace:apps/cli"],
+  }
+}
