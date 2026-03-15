@@ -1,6 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname } from "node:path";
 
 import {
   createVaultConfig,
@@ -10,6 +17,18 @@ import {
   unlockRootKey,
   type EncryptedBlob,
 } from "../../crypto/src/index.ts";
+import {
+  assertPathIsDirectory,
+  assertPathIsFile,
+  decryptFileArtifact,
+  decryptFolderArtifact,
+  defaultDecryptedFilePath,
+  defaultDecryptedFolderPath,
+  defaultEncryptedFilePath,
+  defaultEncryptedFolderPath,
+  encryptFileArtifact,
+  encryptFolderArtifact,
+} from "./artifacts.ts";
 import { AuthoDatabase, type AuditRow, type LeaseRow, type SecretRow } from "../../storage/src/index.ts";
 
 export type SecretType = "note" | "otp" | "password";
@@ -17,6 +36,7 @@ export type SecretType = "note" | "otp" | "password";
 export type SecretRecord = {
   createdAt: string;
   id: string;
+  metadata: Record<string, unknown>;
   name: string;
   type: SecretType;
   updatedAt: string;
@@ -24,7 +44,7 @@ export type SecretRecord = {
   value: string;
 };
 
-export type SecretSummary = Omit<SecretRecord, "username" | "value">;
+export type SecretSummary = Omit<SecretRecord, "metadata" | "username" | "value">;
 
 export type AuditEvent = {
   createdAt: string;
@@ -42,6 +62,7 @@ export type EnvMapping = {
 };
 
 type StoredSecretPayload = {
+  metadata: Record<string, unknown>;
   username: string | null;
   value: string;
 };
@@ -53,6 +74,18 @@ type LeaseState = {
   name: string;
   revokedAt: string | null;
   secretRefs: string[];
+};
+
+type LegacySecret = {
+  algorithm?: string;
+  description?: string;
+  digits?: number;
+  name?: string;
+  secret?: string;
+  type?: string;
+  url?: string;
+  username?: string;
+  value?: string;
 };
 
 function requireValue(value: string | undefined, label: string): string {
@@ -150,6 +183,64 @@ function toAuditEvent(row: AuditRow): AuditEvent {
     subjectRef: row.subjectRef,
     subjectType: row.subjectType,
   };
+}
+
+function normalizeMetadata(input: Record<string, unknown> | undefined): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(input ?? {}).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+  );
+}
+
+function parseLegacySecret(secret: LegacySecret): {
+  metadata: Record<string, unknown>;
+  name: string;
+  type: SecretType;
+  username?: string;
+  value: string;
+} {
+  const type = normalizeSecretType(requireValue(secret.type, "legacy.type"));
+  const name = requireValue(secret.name, "legacy.name");
+  const value = requireValue(secret.secret ?? secret.value, "legacy.secret");
+
+  if (type === "password") {
+    return {
+      metadata: normalizeMetadata({
+        description: secret.description,
+        url: secret.url,
+      }),
+      name,
+      type,
+      username: secret.username,
+      value,
+    };
+  }
+
+  if (type === "otp") {
+    return {
+      metadata: normalizeMetadata({
+        algorithm: secret.algorithm ?? "SHA1",
+        description: secret.description,
+        digits: secret.digits ?? 6,
+      }),
+      name,
+      type,
+      username: secret.username,
+      value,
+    };
+  }
+
+  return {
+    metadata: normalizeMetadata({
+      description: secret.description,
+    }),
+    name,
+    type,
+    value,
+  };
+}
+
+function quoteEnvValue(value: string): string {
+  return JSON.stringify(value);
 }
 
 export function defaultVaultPath(cwd = process.cwd()): string {
@@ -267,6 +358,7 @@ export class VaultSession {
     return {
       createdAt: row.createdAt,
       id: row.id,
+      metadata: normalizeMetadata(secret.metadata),
       name: row.name,
       type: normalizeSecretType(row.type),
       updatedAt: row.updatedAt,
@@ -313,6 +405,7 @@ export class VaultSession {
   }
 
   addSecret(input: {
+    metadata?: Record<string, unknown>;
     name: string;
     type: string;
     username?: string;
@@ -331,6 +424,7 @@ export class VaultSession {
     const dek = randomBytes(32);
     const payload = encryptWithKey(
       JSON.stringify({
+        metadata: normalizeMetadata(input.metadata),
         username: input.username ?? null,
         value: input.value,
       } satisfies StoredSecretPayload),
@@ -349,6 +443,7 @@ export class VaultSession {
       wrappedKey: JSON.stringify(wrappedKey),
     });
     this.audit("secret.created", "secret", input.name, "Secret created", {
+      metadataKeys: Object.keys(normalizeMetadata(input.metadata)),
       name: input.name,
       type,
     });
@@ -360,6 +455,41 @@ export class VaultSession {
       type,
       updatedAt: now,
     };
+  }
+
+  importLegacyFile(filePath: string, options?: { skipExisting?: boolean }): {
+    imported: number;
+    skipped: number;
+  } {
+    const raw = JSON.parse(readFileSync(filePath, "utf8")) as LegacySecret[];
+    let imported = 0;
+    let skipped = 0;
+
+    for (const entry of raw) {
+      if (!entry) {
+        continue;
+      }
+
+      const parsed = parseLegacySecret(entry);
+      if (this.db.findSecret(parsed.name)) {
+        if (options?.skipExisting ?? true) {
+          skipped += 1;
+          continue;
+        }
+        throw new Error(`Secret already exists: ${parsed.name}`);
+      }
+
+      this.addSecret(parsed);
+      imported += 1;
+    }
+
+    this.audit("import.legacy", "vault", null, "Legacy backup imported", {
+      imported,
+      path: filePath,
+      skipped,
+    });
+
+    return { imported, skipped };
   }
 
   listSecrets(): SecretSummary[] {
@@ -375,6 +505,7 @@ export class VaultSession {
   getSecret(ref: string): SecretRecord {
     const secret = this.getSecretOrThrow(ref);
     this.audit("secret.read", "secret", secret.name, "Secret read", {
+      metadataKeys: Object.keys(secret.metadata),
       name: secret.name,
       type: secret.type,
     });
@@ -495,6 +626,46 @@ export class VaultSession {
     return env;
   }
 
+  syncEnvFile(input: {
+    force?: boolean;
+    leaseId?: string;
+    mappings: EnvMapping[];
+    outputPath: string;
+    ttlSeconds?: number;
+  }): { expiresAt: string | null; outputPath: string; varCount: number } {
+    const env = this.buildEnv(input.mappings, input.leaseId);
+    if (!input.force && existsSync(input.outputPath)) {
+      throw new Error(`Env file already exists: ${input.outputPath}`);
+    }
+
+    const createdAt = new Date().toISOString();
+    const expiresAt = input.ttlSeconds
+      ? new Date(Date.now() + input.ttlSeconds * 1000).toISOString()
+      : null;
+    const lines = [
+      "# autho-generated=true",
+      `# autho-created-at=${createdAt}`,
+      `# autho-expires-at=${expiresAt ?? ""}`,
+      ...Object.entries(env).map(([key, value]) => `${key}=${quoteEnvValue(value)}`),
+      "",
+    ];
+
+    mkdirSync(dirname(input.outputPath), { recursive: true });
+    writeFileSync(input.outputPath, lines.join("\n"), "utf8");
+    this.audit("env.synced", "lease", input.leaseId ?? null, "Environment file written", {
+      envKeys: Object.keys(env),
+      expiresAt,
+      leaseId: input.leaseId ?? null,
+      outputPath: input.outputPath,
+    });
+
+    return {
+      expiresAt,
+      outputPath: input.outputPath,
+      varCount: Object.keys(env).length,
+    };
+  }
+
   runExec(input: {
     cmd: string[];
     leaseId?: string;
@@ -529,6 +700,68 @@ export class VaultSession {
       stderr: (result.stderr ?? Buffer.from("")).toString("utf8"),
       stdout: (result.stdout ?? Buffer.from("")).toString("utf8"),
     };
+  }
+
+  encryptFile(inputPath: string, outputPath?: string): { outputPath: string } {
+    assertPathIsFile(inputPath);
+    const result = encryptFileArtifact(
+      inputPath,
+      outputPath ?? defaultEncryptedFilePath(inputPath),
+      this.rootKey,
+    );
+    this.audit("file.encrypted", "artifact", result.outputPath, "File encrypted", {
+      inputPath,
+      outputPath: result.outputPath,
+    });
+
+    return result;
+  }
+
+  decryptFile(inputPath: string, outputPath?: string): { outputPath: string } {
+    assertPathIsFile(inputPath);
+    const result = decryptFileArtifact(
+      inputPath,
+      outputPath ?? defaultDecryptedFilePath(inputPath),
+      this.rootKey,
+    );
+    this.audit("file.decrypted", "artifact", result.outputPath, "File decrypted", {
+      inputPath,
+      outputPath: result.outputPath,
+    });
+
+    return result;
+  }
+
+  encryptFolder(inputPath: string, outputPath?: string): { fileCount: number; outputPath: string } {
+    assertPathIsDirectory(inputPath);
+    const result = encryptFolderArtifact(
+      inputPath,
+      outputPath ?? defaultEncryptedFolderPath(inputPath),
+      this.rootKey,
+    );
+    this.audit("folder.encrypted", "artifact", result.outputPath, "Folder encrypted", {
+      fileCount: result.fileCount,
+      inputPath,
+      outputPath: result.outputPath,
+    });
+
+    return result;
+  }
+
+  decryptFolder(inputPath: string, outputPath?: string): { fileCount: number; outputPath: string } {
+    assertPathIsFile(inputPath);
+    const result = decryptFolderArtifact(
+      inputPath,
+      outputPath ?? defaultDecryptedFolderPath(inputPath),
+      this.rootKey,
+    );
+    this.audit("folder.decrypted", "artifact", result.outputPath, "Folder decrypted", {
+      fileCount: result.fileCount,
+      inputPath,
+      outputPath: result.outputPath,
+    });
+
+    return result;
   }
 
   listAudit(limit = 50): AuditEvent[] {
