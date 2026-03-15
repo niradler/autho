@@ -1,11 +1,14 @@
 #!/usr/bin/env bun
 
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
   VaultService,
+  defaultProjectFilePath,
   defaultVaultPath,
   resolveMappings,
+  writeProjectConfig,
 } from "../../../packages/core/src/index.ts";
 
 type ParsedArgs = {
@@ -118,6 +121,8 @@ function help(): string {
     "",
     "Commands:",
     "  init --password <value> [--vault <path>]",
+    "  status [--password <value>] [--vault <path>] [--project-file <path>] [--json]",
+    "  project init --map <ENV_NAME=secretRef> [--map <ENV_NAME=secretRef>] [--output <path>] [--force] [--json]",
     "  import legacy --password <value> --file <path> [--skip-existing] [--vault <path>] [--json]",
     "  secrets add --password <value> --name <name> --type <password|note|otp> --value <value> [--username <value>] [--url <value>] [--description <value>] [--digits <value>] [--algorithm <value>] [--vault <path>]",
     "  secrets list --password <value> [--vault <path>] [--json]",
@@ -137,6 +142,7 @@ function help(): string {
     "",
     "Notes:",
     "  The default vault path is ./.autho/vault.db",
+    "  The default project file is ./.autho/project.json when it exists",
     "  AUTHO_MASTER_PASSWORD can be used instead of --password",
   ].join("\n");
 }
@@ -146,6 +152,9 @@ async function main(): Promise<void> {
   const [scope, action] = args.positionals;
   const json = getBoolean(args, "json");
   const vaultPath = getString(args, "vault") ?? defaultVaultPath();
+  const explicitProjectFile = getString(args, "project-file");
+  const fallbackProjectFile = defaultProjectFilePath();
+  const projectFile = explicitProjectFile ?? (existsSync(fallbackProjectFile) ? fallbackProjectFile : undefined);
   const password = getString(args, "password") ?? process.env.AUTHO_MASTER_PASSWORD;
 
   if (!scope || scope === "help" || scope === "--help") {
@@ -156,6 +165,31 @@ async function main(): Promise<void> {
   if (scope === "init") {
     const result = VaultService.initialize(vaultPath, required(password, "--password"));
     output(result, json);
+    return;
+  }
+
+  if (scope === "status") {
+    output(
+      VaultService.status(vaultPath, {
+        password,
+        projectFile,
+      }),
+      json,
+    );
+    return;
+  }
+
+  if (scope === "project" && action === "init") {
+    output(
+      writeProjectConfig({
+        force: getBoolean(args, "force"),
+        mappings: resolveMappings({
+          maps: getStrings(args, "map"),
+        }),
+        outputPath: absolutePath(getString(args, "output") ?? projectFile ?? defaultProjectFilePath()),
+      }),
+      json,
+    );
     return;
   }
 
@@ -234,7 +268,7 @@ async function main(): Promise<void> {
         session.renderEnv(
           resolveMappings({
             maps: getStrings(args, "map"),
-            projectFile: getString(args, "project-file"),
+            projectFile,
           }),
           getString(args, "lease"),
         ),
@@ -250,7 +284,7 @@ async function main(): Promise<void> {
           leaseId: getString(args, "lease"),
           mappings: resolveMappings({
             maps: getStrings(args, "map"),
-            projectFile: getString(args, "project-file"),
+            projectFile,
           }),
           outputPath: absolutePath(getString(args, "output") ?? ".env.autho"),
           ttlSeconds: getString(args, "ttl") ? Number(getString(args, "ttl")) : undefined,
@@ -266,7 +300,7 @@ async function main(): Promise<void> {
         leaseId: getString(args, "lease"),
         mappings: resolveMappings({
           maps: getStrings(args, "map"),
-          projectFile: getString(args, "project-file"),
+          projectFile,
         }),
       });
       process.stdout.write(result.stdout);

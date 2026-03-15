@@ -107,6 +107,27 @@ export class AuthoDatabase {
       .run("vault.config", JSON.stringify(config));
   }
 
+  countSecrets(): number {
+    const row = this.db.query("SELECT COUNT(*) AS count FROM secrets").get() as { count: number };
+    return row.count;
+  }
+
+  countActiveLeases(nowIso: string): number {
+    const row = this.db
+      .query(
+        `SELECT COUNT(*) AS count
+         FROM leases
+         WHERE revoked_at IS NULL AND expires_at > ?1`,
+      )
+      .get(nowIso) as { count: number };
+    return row.count;
+  }
+
+  countAuditEvents(): number {
+    const row = this.db.query("SELECT COUNT(*) AS count FROM audit_events").get() as { count: number };
+    return row.count;
+  }
+
   insertSecret(secret: SecretRow): void {
     this.db
       .query(
