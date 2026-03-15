@@ -237,8 +237,10 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
   let server: Bun.Server | null = null;
 
   const shutdown = (): void => {
-    void deleteDaemonState(options.statePath);
-    server?.stop(true);
+    void deleteDaemonState(options.statePath).then(() => {
+      server?.stop(true);
+      process.exit(0);
+    });
   };
 
   const auth = (request: Request): Response | null => {

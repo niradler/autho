@@ -132,7 +132,13 @@ function decodeBase32(input: string): Uint8Array {
   return Uint8Array.from(output);
 }
 
-function generateTotp(secret: string, now = Date.now()): { code: string; expiresAt: string } {
+function generateTotp(
+  secret: string,
+  options?: { algorithm?: string; digits?: number },
+  now = Date.now(),
+): { code: string; expiresAt: string } {
+  const algorithm = (options?.algorithm ?? "sha1").toLowerCase();
+  const digits = options?.digits ?? 6;
   const key = decodeBase32(secret);
   const counter = Math.floor(now / 30_000);
   const message = Buffer.alloc(8);
@@ -143,14 +149,15 @@ function generateTotp(secret: string, now = Date.now()): { code: string; expires
     cursor >>= 8;
   }
 
-  const hash = createHmac("sha1", Buffer.from(key)).update(message).digest();
+  const hash = createHmac(algorithm, Buffer.from(key)).update(message).digest();
   const offset = hash[hash.length - 1] & 0x0f;
   const binary =
     ((hash[offset] & 0x7f) << 24) |
     ((hash[offset + 1] & 0xff) << 16) |
     ((hash[offset + 2] & 0xff) << 8) |
     (hash[offset + 3] & 0xff);
-  const code = String(binary % 1_000_000).padStart(6, "0");
+  const mod = 10 ** digits;
+  const code = String(binary % mod).padStart(digits, "0");
   const expiresAt = new Date((counter + 1) * 30_000).toISOString();
 
   return { code, expiresAt };
@@ -643,7 +650,10 @@ export class VaultSession {
       throw new Error(`Secret is not an OTP secret: ${ref}`);
     }
 
-    const result = generateTotp(secret.value);
+    const result = generateTotp(secret.value, {
+      algorithm: secret.metadata.algorithm as string | undefined,
+      digits: secret.metadata.digits as number | undefined,
+    });
     this.audit("otp.generated", "secret", secret.id, "OTP code generated", {
       expiresAt: result.expiresAt,
     });

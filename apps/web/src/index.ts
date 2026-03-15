@@ -222,9 +222,13 @@ async function main(): Promise<void> {
 
         if (request.method === "POST" && url.pathname === "/api/session/unlock") {
           const body = await readJson<{ password: string; ttlSeconds?: number }>(request);
+          const ttlSeconds = body.ttlSeconds ?? 3600;
+          if (ttlSeconds <= 0 || ttlSeconds > 86400) {
+            return json({ error: "Session TTL must be between 1 and 86400 seconds" }, 400);
+          }
           const rootKey = loadRootKey(vaultPath, body.password);
           const sessionId = randomBytes(16).toString("hex");
-          const expiresAt = new Date(Date.now() + (body.ttlSeconds ?? 3600) * 1000).toISOString();
+          const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
           sessions.set(sessionId, { expiresAt, rootKey });
           return json(
             { expiresAt, sessionId },
