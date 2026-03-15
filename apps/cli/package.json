@@ -1,6 +1,6 @@
 {
   "name": "autho",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Local-first secret manager for humans and coding agents, rebuilt on Bun",
   "type": "module",
   "bin": {
@@ -13,6 +13,11 @@
   "engines": {
     "bun": ">=1.3.10"
   },
+  "dependencies": {
+    "@opentui/core": "latest",
+    "@opentui/react": "latest",
+    "react": ">=19.0.0"
+  },
   "keywords": [
     "secrets",
     "otp",
@@ -20,7 +25,8 @@
     "agent-secrets",
     "secret-manager",
     "vault",
-    "encryption"
+    "encryption",
+    "tui"
   ],
   "author": "Nir Adler",
   "license": "MIT",

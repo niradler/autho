@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
+import { readPasswordMasked } from "./password.ts";
 
 import {
   daemonExec,
@@ -180,6 +181,11 @@ async function askPassword(prompt: PromptAdapter, initial?: string): Promise<str
     return initial;
   }
 
+  // Use masked input when running in a TTY
+  if (process.stdin.isTTY) {
+    return readPasswordMasked("Master password: ");
+  }
+
   return prompt.ask("Master password: ");
 }
 
@@ -292,44 +298,56 @@ async function runWebServer(vaultPath: string, args: ParsedArgs): Promise<void> 
 
 function help(): string {
   return [
-    "Autho Bun CLI",
+    "Autho – Local-first secret manager for humans and coding agents",
+    "",
+    "Usage:",
+    "  autho                  Open interactive TUI (terminal UI)",
+    "  autho <command>        Run a CLI command (see below)",
     "",
     "Commands:",
-    "  prompt [--password <value>] [--vault <path>]",
-    "  init --password <value> [--vault <path>]",
-    "  status [--password <value>] [--vault <path>] [--project-file <path>] [--json]",
-    "  project init --map <ENV_NAME=secretRef> [--map <ENV_NAME=secretRef>] [--output <path>] [--force] [--json]",
+    "  prompt [--vault <path>]",
+    "  init [--vault <path>]",
+    "  status [--vault <path>] [--project-file <path>] [--json]",
+    "  project init --map <ENV=ref> [--output <path>] [--force] [--json]",
     "  web serve [--vault <path>] [--host <value>] [--port <value>]",
     "  daemon serve [--vault <path>] [--state-file <path>] [--host <value>] [--port <value>]",
     "  daemon status [--state-file <path>] [--json]",
-    "  daemon unlock --password <value> [--ttl <seconds>] [--state-file <path>] [--json]",
+    "  daemon unlock [--ttl <seconds>] [--state-file <path>] [--json]",
     "  daemon lock --session <id> [--state-file <path>] [--json]",
     "  daemon stop [--state-file <path>] [--json]",
-    "  daemon env render --session <id> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--state-file <path>] [--json]",
-    "  daemon exec --session <id> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--state-file <path>] -- <command>",
-    "  import legacy --password <value> --file <path> [--skip-existing] [--vault <path>] [--json]",
-    "  secrets add --password <value> --name <name> --type <password|note|otp> --value <value> [--username <value>] [--url <value>] [--description <value>] [--digits <value>] [--algorithm <value>] [--vault <path>]",
-    "  secrets list --password <value> [--vault <path>] [--json]",
-    "  secrets get --password <value> --ref <name-or-id> [--vault <path>] [--json]",
-    "  secrets rm --password <value> --ref <name-or-id> [--vault <path>] [--json]",
-    "  otp code --password <value> --ref <name-or-id> [--vault <path>] [--json]",
-    "  lease create --password <value> --secret <name-or-id> [--secret <name-or-id>] --ttl <seconds> [--name <value>] [--vault <path>] [--json]",
-    "  lease revoke --password <value> --lease <lease-id> [--vault <path>] [--json]",
-    "  env render --password <value> --map <ENV_NAME=secretRef> [--map <ENV_NAME=secretRef>] [--project-file <path>] [--lease <lease-id>] [--vault <path>] [--json]",
-    "  env sync --password <value> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--ttl <seconds>] [--output <path>] [--force] [--vault <path>] [--json]",
-    "  exec --password <value> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--vault <path>] -- <command>",
-    "  file encrypt --password <value> --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
-    "  file decrypt --password <value> --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
-    "  files encrypt --password <value> --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
-    "  files decrypt --password <value> --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
-    "  audit list --password <value> [--limit <number>] [--vault <path>] [--json]",
+    "  daemon env render --session <id> --map <ENV=ref> [--project-file <path>] [--lease <id>] [--state-file <path>] [--json]",
+    "  daemon exec --session <id> --map <ENV=ref> [--project-file <path>] [--lease <id>] [--state-file <path>] -- <cmd>",
+    "  import legacy --file <path> [--skip-existing] [--vault <path>] [--json]",
+    "  secrets add --name <name> --type <password|note|otp> --value <value> [--username <v>] [--url <v>] [--description <v>] [--digits <v>] [--algorithm <v>] [--vault <path>]",
+    "  secrets list [--vault <path>] [--json]",
+    "  secrets get --ref <name-or-id> [--vault <path>] [--json]",
+    "  secrets rm --ref <name-or-id> [--vault <path>] [--json]",
+    "  secrets edit --ref <name-or-id> [--new-name <v>] [--value <v>] [--username <v>] [--url <v>] [--description <v>] [--vault <path>] [--json]",
+    "  otp code --ref <name-or-id> [--vault <path>] [--json]",
+    "  lease create --secret <ref> [--secret <ref>] --ttl <seconds> [--name <v>] [--vault <path>] [--json]",
+    "  lease revoke --lease <id> [--vault <path>] [--json]",
+    "  env render --map <ENV=ref> [--project-file <path>] [--lease <id>] [--vault <path>] [--json]",
+    "  env sync --map <ENV=ref> [--project-file <path>] [--lease <id>] [--ttl <seconds>] [--output <path>] [--force] [--vault <path>] [--json]",
+    "  exec --map <ENV=ref> [--project-file <path>] [--lease <id>] [--vault <path>] -- <cmd>",
+    "  file encrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
+    "  file decrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
+    "  files encrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
+    "  files decrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
+    "  audit list [--limit <number>] [--vault <path>] [--json]",
+    "",
+    "Authentication:",
+    "  When running interactively (TTY), you will be securely prompted for your",
+    "  master password with masked input (no --password flag needed).",
+    "",
+    "  For automation and coding agents, use one of:",
+    "    AUTHO_MASTER_PASSWORD=<value>    Environment variable (recommended for agents)",
+    "    --password <value>               CLI flag (visible in shell history - avoid!)",
     "",
     "Notes:",
-    "  Running `autho` with no command enters interactive prompt mode.",
-    "  The default vault path is ~/.autho/vault.db (or AUTHO_HOME/vault.db).",
-    "  The default project file is ~/.autho/project.json when it exists (or AUTHO_HOME/project.json).",
-    "  The default daemon state file is ~/.autho/daemon.json (or AUTHO_HOME/daemon.json).",
-    "  AUTHO_MASTER_PASSWORD can be used instead of --password.",
+    "  Running `autho` with no arguments opens the interactive TUI.",
+    "  The default vault path is ~/.autho/vault.db (override with AUTHO_HOME).",
+    "  The default project file is ~/.autho/project.json.",
+    "  The default daemon state file is ~/.autho/daemon.json.",
   ].join("\n");
 }
 
@@ -342,9 +360,16 @@ async function main(): Promise<void> {
   const explicitProjectFile = getString(args, "project-file");
   const fallbackProjectFile = defaultProjectFilePath();
   const projectFile = explicitProjectFile ?? (existsSync(fallbackProjectFile) ? fallbackProjectFile : undefined);
-  const password = getString(args, "password") ?? process.env.AUTHO_MASTER_PASSWORD;
+  let password = getString(args, "password") ?? process.env.AUTHO_MASTER_PASSWORD;
 
   if (!scope) {
+    // TUI mode when running interactively with no args
+    if (process.stdin.isTTY) {
+      const { runTui } = await import("./tui.tsx");
+      await runTui(vaultPath);
+      return;
+    }
+    // Non-TTY: use the text-based prompt mode
     await runPromptMode(vaultPath, password);
     return;
   }
@@ -357,6 +382,18 @@ async function main(): Promise<void> {
   if (scope === "prompt") {
     await runPromptMode(vaultPath, password);
     return;
+  }
+
+  // Auto-prompt for password when running interactively and no --password/env var
+  if (!password && process.stdin.isTTY) {
+    const needsPassword = [
+      "init", "secrets", "otp", "lease", "env", "exec",
+      "file", "files", "audit", "import",
+    ].includes(scope);
+    const daemonNeedsPassword = scope === "daemon" && action === "unlock";
+    if (needsPassword || daemonNeedsPassword) {
+      password = await readPasswordMasked("Master password: ");
+    }
   }
 
   if (scope === "init") {
@@ -502,6 +539,19 @@ async function main(): Promise<void> {
     if (scope === "secrets" && action === "rm") {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
       output(session.removeSecret(required(ref, "--ref")), jsonMode);
+      return;
+    }
+
+    if (scope === "secrets" && action === "edit") {
+      const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
+      const updates: Record<string, string | Record<string, unknown> | undefined> = {};
+      if (getString(args, "new-name")) updates.name = getString(args, "new-name");
+      if (getString(args, "value")) updates.value = getString(args, "value");
+      if (getString(args, "username")) updates.username = getString(args, "username");
+      if (getString(args, "type")) updates.type = getString(args, "type");
+      const meta = buildSecretMetadata(args);
+      if (Object.keys(meta).length > 0) updates.metadata = meta;
+      output(session.updateSecret(required(ref, "--ref"), updates), jsonMode);
       return;
     }
 

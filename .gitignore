@@ -7,3 +7,4 @@ coverage/
 .DS_Store
 .codex-tmp/
 .claude/settings.local.json
+node_modules

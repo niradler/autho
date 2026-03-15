@@ -580,6 +580,69 @@ export class VaultSession {
     };
   }
 
+  updateSecret(
+    ref: string,
+    updates: {
+      metadata?: Record<string, unknown>;
+      name?: string;
+      type?: string;
+      username?: string;
+      value?: string;
+    },
+  ): SecretSummary {
+    const existing = this.getSecretOrThrow(ref);
+
+    // Check name uniqueness if renaming
+    if (updates.name && updates.name !== existing.name) {
+      const conflict = this.db.findSecret(updates.name);
+      if (conflict && conflict.id !== existing.id) {
+        throw new Error(`Secret already exists: ${updates.name}`);
+      }
+    }
+
+    const newName = updates.name ?? existing.name;
+    const newType = updates.type ? normalizeSecretType(updates.type) : existing.type;
+    const newValue = updates.value ?? existing.value;
+    const newUsername = updates.username !== undefined ? (updates.username || null) : existing.username;
+    const newMetadata = updates.metadata
+      ? normalizeMetadata({ ...existing.metadata, ...updates.metadata })
+      : existing.metadata;
+
+    const now = new Date().toISOString();
+
+    // Re-encrypt payload with existing DEK
+    const wrappedKeyBlob = JSON.parse(this.db.findSecret(existing.id)!.wrappedKey) as EncryptedBlob;
+    const dek = decryptWithKey(wrappedKeyBlob, this.rootKey, `autho:secret:${existing.id}:dek`);
+    const payload = encryptWithKey(
+      JSON.stringify({
+        metadata: newMetadata,
+        username: newUsername,
+        value: newValue,
+      } satisfies StoredSecretPayload),
+      dek,
+      `autho:secret:${existing.id}:payload`,
+    );
+
+    this.db.updateSecret(existing.id, {
+      name: newName,
+      payload: JSON.stringify(payload),
+      type: newType,
+      updatedAt: now,
+    });
+
+    this.audit("secret.updated", "secret", existing.id, "Secret updated", {
+      fields: Object.keys(updates).filter((k) => (updates as Record<string, unknown>)[k] !== undefined),
+    });
+
+    return {
+      createdAt: existing.createdAt,
+      id: existing.id,
+      name: newName,
+      type: newType,
+      updatedAt: now,
+    };
+  }
+
   importLegacyFile(filePath: string, options?: { skipExisting?: boolean }): {
     imported: number;
     skipped: number;

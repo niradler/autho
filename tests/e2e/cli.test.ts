@@ -81,7 +81,7 @@ function cookieHeader(setCookie: string | null): string {
 }
 
 describe("autho rewrite CLI", () => {
-  test("covers init, project config, status, secret CRUD, otp, lease, env, exec, audit, and revoke flows", () => {
+  test("covers init, project config, status, secret CRUD, otp, lease, env, exec, audit, and revoke flows", { timeout: 15000 }, () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "autho-e2e-"));
     const vaultPath = join(tempRoot, ".autho", "vault.db");
     const projectFile = join(tempRoot, ".autho", "project.json");

@@ -15,7 +15,7 @@
     "autho": "bun run ./apps/cli/src/index.ts",
     "daemon": "bun run ./apps/daemon/src/index.ts serve",
     "web": "bun run ./apps/web/src/index.ts serve",
-    "build:cli": "bun build ./apps/cli/src/index.ts --outfile ./apps/cli/dist/autho.js --target bun",
+    "build:cli": "bun build ./apps/cli/src/index.ts --outfile ./apps/cli/dist/autho.js --target bun --external @opentui/core --external @opentui/react --external react",
     "build:daemon": "bun build ./apps/daemon/src/index.ts --outfile ./dist/autho-daemon.js --target bun",
     "build:web": "bun build ./apps/web/src/index.ts --outfile ./dist/autho-web.js --target bun",
     "build:cli:compile": "bun build ./apps/cli/src/index.ts --outfile ./apps/cli/dist/autho --target bun --compile",
@@ -40,5 +40,11 @@
   ],
   "author": "Nir Adler",
   "license": "MIT",
-  "description": "Local-first secret manager for humans and coding agents, rebuilt on Bun"
+  "description": "Local-first secret manager for humans and coding agents, rebuilt on Bun",
+  "dependencies": {
+    "@opentui/core": "^0.1.87",
+    "@opentui/react": "^0.1.87",
+    "@types/react": "^19.2.14",
+    "react": "^19.2.4"
+  }
 }

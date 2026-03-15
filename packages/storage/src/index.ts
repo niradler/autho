@@ -209,6 +209,34 @@ export class AuthoDatabase {
     return row ?? null;
   }
 
+  updateSecret(id: string, updates: { name?: string; payload?: string; type?: string; updatedAt: string }): void {
+    const parts: string[] = [];
+    const values: unknown[] = [];
+    let idx = 1;
+
+    if (updates.name !== undefined) {
+      parts.push(`name = ?${idx}`);
+      values.push(updates.name);
+      idx++;
+    }
+    if (updates.type !== undefined) {
+      parts.push(`type = ?${idx}`);
+      values.push(updates.type);
+      idx++;
+    }
+    if (updates.payload !== undefined) {
+      parts.push(`payload = ?${idx}`);
+      values.push(updates.payload);
+      idx++;
+    }
+    parts.push(`updated_at = ?${idx}`);
+    values.push(updates.updatedAt);
+    idx++;
+
+    values.push(id);
+    this.db.query(`UPDATE secrets SET ${parts.join(", ")} WHERE id = ?${idx}`).run(...values);
+  }
+
   deleteSecret(id: string): void {
     this.db.query("DELETE FROM secrets WHERE id = ?1").run(id);
   }
