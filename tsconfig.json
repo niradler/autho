@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noEmit": true,
+    "allowJs": false,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "types": [
+      "bun-types"
+    ]
+  },
+  "include": [
+    "apps/**/*.ts",
+    "packages/core/**/*.ts",
+    "packages/crypto/**/*.ts",
+    "packages/storage/**/*.ts",
+    "tests/**/*.ts"
+  ]
+}
