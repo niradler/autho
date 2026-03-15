@@ -4,34 +4,32 @@
 
 This repository is being rewritten from a legacy secret vault into a modern local-first secret platform for humans and AI coding agents.
 
-The rewrite must preserve existing Autho capabilities while adding:
-
-- secure env injection for commands and agent tasks
-- short-lived secret leases
-- audit and revocation
-- policy-scoped agent access
-- optional proxy or gateway flows so agents can use services without seeing real API keys
+The current release target is narrower than the full plan: close the Bun migration, preserve the legacy feature set that already exists in the Bun codebase, keep the shipped flows stable, and avoid adding new product scope unless the task explicitly requires it.
 
 Read [`plan.md`](./plan.md) before proposing architecture changes or new packages.
 
 ## Fast Context
 
-The current codebase is an old JavaScript pnpm workspace with these legacy surfaces:
+The working tree is now the Bun rewrite:
 
-- `packages/cli`: interactive CLI and file or folder encryption commands
-- `packages/sdk`: secret CRUD, OTP logic, DB wrapper, crypto helpers
-- `packages/server`: minimal Express server and EJS UI
-- `packages/models`: Joi schema for secret records
-- `packages/shared`: config and logging
+- `apps/cli`: Bun CLI for vault, env, exec, lease, audit, import, files, daemon, and local web launch
+- `apps/daemon`: local daemon for repeated unlock and exec workflows
+- `apps/web`: local-only Bun web UI for unlock and secret browsing
+- `packages/core`: vault domain logic and user-facing operations
+- `packages/crypto`: key derivation and envelope encryption helpers
+- `packages/storage`: SQLite storage and migrations
+- `tests/e2e`: CLI and local-service tests that mimic real user behavior
 
-The main rewrite references already cloned into this repo are:
+Legacy JavaScript packages have been removed from the working tree after parity validation. If a future task needs legacy implementation details, use git history rather than recreating the old code in place.
+
+The main reference repos already cloned into this repo are:
 
 - `.codex-tmp/onecli`
 - `.codex-tmp/agent-secrets`
 
 Use them for patterns, not for copy-paste architecture decisions.
 
-## Legacy Capabilities To Preserve
+## Release Capabilities To Preserve
 
 - password secrets
 - OTP secrets
@@ -40,16 +38,20 @@ Use them for patterns, not for copy-paste architecture decisions.
 - folder encryption and decryption
 - JSON import
 - local-first usage
+- env injection for commands
+- short-lived leases with revoke
+- audit visibility
+- local daemon unlock flow
+- local web unlock and secret browsing
 
-## What Is Wrong Today
+## What Must Not Regress
 
-- crypto design is weak
-- the master password hash doubles as the encryption key
-- storage is tied to `conf`
-- server auth sends master credentials in headers
-- no meaningful tests
-
-Future work should improve these areas, not reinforce them.
+- envelope encryption and SQLite storage
+- Bun-first build, test, and bundle flow
+- process-level user-flow tests
+- prompt mode when running `autho` with no arguments
+- secure env injection and `exec`
+- local-only daemon and web behavior
 
 ## Rewrite Direction
 
@@ -60,9 +62,9 @@ Prefer this target shape:
 - SQLite-first storage with migrations
 - modern envelope encryption
 - CLI plus local daemon
-- clean API and dashboard
+- clean API and dashboard later
 - agent commands for `env`, `exec`, `lease`, `revoke`, and `audit`
-- optional proxy mode for non-exposure service access
+- optional proxy mode for non-exposure service access later
 
 ## First Files To Read
 
@@ -70,12 +72,14 @@ For local repo context:
 
 - `package.json`
 - `Readme.md`
-- `packages/cli/bin.js`
-- `packages/cli/app.js`
-- `packages/sdk/cipher.js`
-- `packages/sdk/secrets.js`
-- `packages/sdk/otp.js`
-- `packages/server/middlewares/auth.js`
+- `MIGRATION.md`
+- `apps/cli/src/index.ts`
+- `apps/daemon/src/index.ts`
+- `apps/web/src/index.ts`
+- `packages/core/src/index.ts`
+- `packages/crypto/src/index.ts`
+- `packages/storage/src/index.ts`
+- `tests/e2e/cli.test.ts`
 - `plan.md`
 
 For reference patterns:
@@ -96,16 +100,18 @@ Use these first:
 rg --files
 Get-Content package.json
 Get-Content Readme.md
-Get-ChildItem packages -Recurse -Depth 2
+Get-Content MIGRATION.md
+Get-ChildItem apps,packages,tests -Recurse -Depth 3
 ```
 
 Useful targeted reads:
 
 ```powershell
-Get-Content packages\cli\bin.js
-Get-Content packages\sdk\cipher.js
-Get-Content packages\sdk\secrets.js
-Get-Content packages\server\middlewares\auth.js
+Get-Content apps\cli\src\index.ts
+Get-Content packages\core\src\index.ts
+Get-Content packages\crypto\src\index.ts
+Get-Content packages\storage\src\index.ts
+Get-Content tests\e2e\cli.test.ts
 Get-Content plan.md
 ```
 
@@ -120,27 +126,28 @@ Get-Content .codex-tmp\agent-secrets\cmd\secrets\exec.go
 
 ## Working Rules For Future Agents
 
-- Preserve feature parity before deleting old capabilities.
-- Do not keep the existing crypto or auth model just because it exists.
+- Preserve feature parity before deleting or reshaping user-visible flows.
+- Do not weaken the current crypto, unlock, or audit model for convenience.
 - Prefer small migration-safe slices over a big-bang rewrite.
 - Keep human vault flows and agent-secret flows clearly separated.
 - For agent features, default to least privilege, TTLs, audit, and revocation.
 - Prefer non-exposure patterns when possible: proxy or broker over raw secret return.
 - If architecture direction changes materially, update `plan.md` first.
 - If new reference repos are introduced, record why they matter and what pattern they contribute.
+- Treat Bun compatibility as a release requirement, not a secondary convenience.
 
 ## Expected Deliverables In Future Passes
 
 Depending on the task, future work should usually update one or more of:
 
 - `plan.md`
-- architecture docs
-- migration docs
+- release or migration docs
 - typed packages for the new core
 - tests proving parity or safer agent behavior
+- packaging or release automation
 
 ## Notes
 
 - `.codex-tmp` is for inspection only.
 - The current repo may be dirty. Do not revert unrelated user changes.
-- This project should end up easier for both humans and coding agents to operate safely.
+- This project should stay easy for both humans and coding agents to operate safely.

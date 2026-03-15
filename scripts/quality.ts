@@ -118,6 +118,11 @@ async function typecheck(): Promise<void> {
       outdir: "./tmp/quality/daemon",
       target: "bun",
     }),
+    Bun.build({
+      entrypoints: ["./apps/web/src/index.ts"],
+      outdir: "./tmp/quality/web",
+      target: "bun",
+    }),
   ];
 
   const results = await Promise.all(builds);
@@ -166,4 +171,5 @@ main().catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 });
+
 

@@ -1,169 +1,154 @@
-# Autho: Open Source Authentication and Password Management Tool
+# Autho
 
-Autho is an open-source, self-hosted alternative to services like Authy, providing One-Time Password (OTP) generation and password management functionalities. With Autho, users can securely manage their authentication tokens and passwords while maintaining full control over their data.
+Autho is a local-first secret manager for humans and coding agents, rebuilt on Bun.
 
-## Features
+This release is the Bun migration and legacy-parity cut. It keeps the existing core workflows, hardens the local vault design, and ships the current Bun CLI, daemon, and local web surface. It does not add new platform scope beyond parity and release hardening.
 
-- **OTP Generation**: Autho allows users to generate One-Time Passwords (OTPs) for two-factor authentication (2FA) using industry-standard algorithms.
-- **Password Management**: Autho provides a secure vault for users to store and manage their passwords, ensuring easy access and strong encryption.
+## What Ships In This Release
 
-- **Self-Hosted**: Autho can be self-hosted, giving users complete control over their data and eliminating reliance on third-party services.
+- Password, note, and OTP secrets
+- Interactive prompt workflow via `autho` with no arguments
+- Secret CRUD from the Bun CLI
+- OTP code generation
+- File encryption and decryption
+- Folder encryption and decryption
+- Legacy JSON import
+- Project secret mappings
+- `env render`, `env sync`, and `exec`
+- Short-lived secret leases with audit and revoke
+- Local daemon unlock flow for repeated agent tasks
+- Local-only Bun web UI for unlock and secret browsing
 
-- **Open Source**: Autho is open-source software, allowing users to inspect, modify, and contribute to its codebase, ensuring transparency and security.
+## Security Model
 
-## Installation
+- The master password is used only to derive a key-encryption key with `scrypt`
+- Each vault gets a random root key
+- Secret payloads and file artifacts use AES-256-GCM envelope encryption
+- The vault uses SQLite instead of the old `conf` store
+- Audit events record access without storing secret values
 
-To install Autho globally, use npm:
+## Requirements
 
-```sh
-npm install -g autho
-```
+- Bun `1.3.10` or newer
+- Windows, macOS, or Linux
 
-## Getting Started
-
-1. **Setting Up Autho**: After installation, run the `autho` command to set up Autho for the first time. Follow the on-screen instructions to configure your master password and other settings.
-
-2. **Generating OTPs**: Use Autho to generate OTPs for your accounts by providing the associated account name or label. Autho will generate a time-based OTP using a secure algorithm.
-
-3. **Managing Passwords**: Autho provides a secure vault for storing and managing your passwords. You can add, view, update, and delete passwords using the CLI interface.
-
-4. **Secure files**: Autho offers a reliable method for encrypting and decrypting files, ensuring their security and integrity.
-
-5. **Self-Hosting**: If you prefer self-hosting, deploy Autho on your own server by following the instructions provided in the documentation. (TBD)
-
-## Security Considerations
-
-- **Encryption**: Autho employs strong encryption algorithms to protect user data, ensuring that passwords and OTPs are securely stored.
-
-- **Master Password**: Users are required to set a master password during setup, which is used to encrypt and decrypt their data. Choose a strong and unique master password to enhance security.
-
-- **Self-Hosting**: By self-hosting Autho, users maintain control over their data and reduce reliance on external services, minimizing the risk of data breaches.
-
-- **Regular Updates**: Keep Autho and its dependencies up to date to ensure that security vulnerabilities are addressed promptly.
-
-## Usage
+## Quick Start
 
 ```bash
-autho [options] [command]
+bun install
+bun run hooks:install
+bun run autho -- init --password "correct horse battery staple"
 ```
 
-### Options:
-
-- `--version`: Output the version number
-- `-p, --password <password>`: Master password
-- `-ph, --passwordHash <passwordHash>`: Master password hash
-- `-n, --name <name>`: Collection name
-- `--dataFolder <folderPath>`: Folder path to store secrets db
-- `-h, --help`: Display help for command
-
-### Commands:
-
-#### 0. `prompt`
-
-The main terminal ui, recommended most ot the time.
+Run the interactive prompt:
 
 ```bash
-autho
+bun run autho
 ```
 
-#### 1. `import`
-
-Import secrets from a backup file.
+Add and read a secret:
 
 ```bash
-autho import --filePath <filePath>
+bun run autho -- secrets add --password "correct horse battery staple" --name github --type password --value ghp_example --username octocat --url https://github.com
+bun run autho -- secrets get --password "correct horse battery staple" --ref github --json
 ```
 
-#### 2. `secret`
-
-Perform secret operations like creating, listing, reading, and deleting secrets.
+Generate an OTP code:
 
 ```bash
-autho secret [options]
+bun run autho -- otp code --password "correct horse battery staple" --ref my-otp --json
 ```
 
-Options:
-- `--action <action>`: Secret action (create/list/read/delete)
-- `--id <id>`: Secret id
-- `--decrypt`: Decrypt secret
-
-#### 3. `file`
-
-Encrypt/Decrypt a file.
+Encrypt and decrypt a file:
 
 ```bash
-autho file [options]
+bun run autho -- file encrypt --password "correct horse battery staple" --input ./secret.txt
+bun run autho -- file decrypt --password "correct horse battery staple" --input ./secret.txt.autho
 ```
 
-Options:
-- `-f, --filePath <filePath>`: File path
-- `-en, --encrypt`: Encrypt file
-- `-de, --decrypt`: Decrypt file
-- `--override`: Override original file
-
-#### 4. `files`
-
-Encrypt/Decrypt files in a folder.
+Create a project mapping and render env vars:
 
 ```bash
-autho files [options]
+bun run autho -- project init --map OPENAI_API_KEY=openai --map GITHUB_TOKEN=github --force
+bun run autho -- env render --password "correct horse battery staple" --project-file ./.autho/project.json --json
 ```
 
-Options:
-- `--input <inputPath>`: Folder path
-- `--output <outputPath>`: Folder path
-- `-en, --encrypt`: Encrypt folder
-- `-de, --decrypt`: Decrypt folder
+Run a command with injected env vars:
 
-## Examples
-
-1. Import secrets from a backup file:
 ```bash
-autho import --filePath backup.json
+bun run autho -- exec --password "correct horse battery staple" --project-file ./.autho/project.json -- bun -e "console.log(process.env.GITHUB_TOKEN)"
 ```
 
-2. Create a new secret:
+Start the daemon:
+
 ```bash
-autho secret --action create
+bun run daemon
 ```
 
-3. Read a secret:
+Start the local web UI:
+
 ```bash
-autho secret --action read --id <secretId> --decrypt
+bun run web
 ```
 
-4. Encrypt a file:
+## Build And Release
+
+Build Bun bundles:
+
 ```bash
-autho file --filePath secret.txt --encrypt
+bun run build
 ```
 
-5. Decrypt a file:
+Build standalone compiled binaries:
+
 ```bash
-autho file --filePath secret.txt.autho --decrypt
+bun run build:compile
 ```
 
-6. Encrypt files in a folder:
+Run the full quality gate:
+
 ```bash
-autho files --input /path/to/folder --encrypt
+bun run check
 ```
 
-7. Decrypt files in a folder:
+## Migration
+
+This Bun release supports migration from legacy JSON backups and documented manual migration from older `conf`-based installs. Direct in-product `conf` store migration is intentionally not part of this release.
+
+See [MIGRATION.md](./MIGRATION.md) for the supported process and the expected JSON format.
+
+## Testing
+
+The Bun end-to-end suite covers the main user flows from real process boundaries:
+
+- vault init and status
+- prompt mode create and list
+- secret CRUD
+- OTP generation
+- project mapping, env render or sync, and exec
+- lease create and revoke
+- audit inspection
+- legacy JSON import
+- file and folder crypto
+- daemon-backed unlock and exec
+- local web unlock and secret APIs
+
+Run it with:
+
 ```bash
-autho files --input /path/to/folder.autho --decrypt
+bun test
 ```
 
-## Contributing
+## Repo Layout
 
-Autho is an open-source project, and contributions are welcome! Feel free to report issues, suggest features, or submit pull requests on the project's GitHub repository.
+- `apps/cli`: Bun CLI
+- `apps/daemon`: local daemon
+- `apps/web`: local Bun web UI
+- `packages/core`: domain and vault logic
+- `packages/crypto`: KDF and encryption helpers
+- `packages/storage`: SQLite access and migrations
+- `tests/e2e`: process-level user-flow tests
 
-## License
+## Current Scope
 
-Autho is licensed under the [MIT License](LICENSE), allowing for unrestricted use, modification, and distribution.
-
-## Support
-
-For support or inquiries, please open an issue for assistance.
-
-## Acknowledgments
-
-Autho is built upon various open-source libraries and technologies. We extend our gratitude to the developers and contributors of these projects.
+This release is intended to be stable for local-first Bun usage and parity with the legacy vault workflows. Planned future work such as proxy mode, richer agent policy management, and a fuller dashboard remains tracked in [plan.md](./plan.md) and is not part of this release cut.
