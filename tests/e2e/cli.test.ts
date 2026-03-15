@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 const repoRoot = join(import.meta.dir, "..", "..");
+const testAuthoHome = mkdtempSync(join(tmpdir(), "autho-home-"));
 
 function runCli(args: string[], env?: Record<string, string>) {
   const result = Bun.spawnSync({
@@ -18,6 +19,7 @@ function runCli(args: string[], env?: Record<string, string>) {
     cwd: repoRoot,
     env: {
       ...process.env,
+      AUTHO_HOME: testAuthoHome,
       ...(env ?? {}),
     },
     stderr: "pipe",
@@ -37,6 +39,7 @@ async function runCliInteractive(args: string[], input: string, env?: Record<str
     cwd: repoRoot,
     env: {
       ...process.env,
+      AUTHO_HOME: testAuthoHome,
       ...(env ?? {}),
     },
     stdin: "pipe",
@@ -706,4 +709,7 @@ describe("autho rewrite CLI", () => {
     }
   });
 });
+
+
+
 

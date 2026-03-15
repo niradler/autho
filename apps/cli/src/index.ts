@@ -318,9 +318,9 @@ function help(): string {
     "",
     "Notes:",
     "  Running `autho` with no command enters interactive prompt mode.",
-    "  The default vault path is ./.autho/vault.db.",
-    "  The default project file is ./.autho/project.json when it exists.",
-    "  The default daemon state file is ./.autho/daemon.json.",
+    "  The default vault path is ~/.autho/vault.db (or AUTHO_HOME/vault.db).",
+    "  The default project file is ~/.autho/project.json when it exists (or AUTHO_HOME/project.json).",
+    "  The default daemon state file is ~/.autho/daemon.json (or AUTHO_HOME/daemon.json).",
     "  AUTHO_MASTER_PASSWORD can be used instead of --password.",
   ].join("\n");
 }
@@ -625,3 +625,4 @@ main().catch((error) => {
   console.error(message);
   process.exit(1);
 });
+

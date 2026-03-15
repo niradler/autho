@@ -2,11 +2,9 @@ import { spawnSync } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
-  writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { basename } from "node:path";
 
 import {
   createVaultConfig,
@@ -29,6 +27,11 @@ import {
   encryptFolderArtifact,
 } from "./artifacts.ts";
 import { AuthoDatabase, type AuditRow, type LeaseRow, type SecretRow } from "../../storage/src/index.ts";
+import {
+  defaultProjectFilePath,
+  defaultVaultPath,
+  writeTextFileSecure,
+} from "./paths.ts";
 
 export type SecretType = "note" | "otp" | "password";
 
@@ -253,6 +256,13 @@ function quoteEnvValue(value: string): string {
   return JSON.stringify(value);
 }
 
+function summarizeCommand(cmd: string[]): { argCount: number; executable: string } {
+  return {
+    argCount: Math.max(0, cmd.length - 1),
+    executable: basename(cmd[0] ?? "unknown"),
+  };
+}
+
 function projectMappingsForStatus(projectFile?: string): { path: string | null; mappings: string[] } {
   if (!projectFile || !existsSync(projectFile)) {
     return {
@@ -267,13 +277,7 @@ function projectMappingsForStatus(projectFile?: string): { path: string | null; 
   };
 }
 
-export function defaultVaultPath(cwd = process.cwd()): string {
-  return `${cwd}/.autho/vault.db`.replace(/\\/g, "/");
-}
-
-export function defaultProjectFilePath(cwd = process.cwd()): string {
-  return `${cwd}/.autho/project.json`.replace(/\\/g, "/");
-}
+export { defaultProjectFilePath, defaultVaultPath } from "./paths.ts";
 
 export function resolveMappings(options: {
   maps?: string[];
@@ -315,8 +319,7 @@ export function writeProjectConfig(input: {
   }
 
   const env = Object.fromEntries(input.mappings.map((mapping) => [mapping.envName, mapping.secretRef]));
-  mkdirSync(dirname(input.outputPath), { recursive: true });
-  writeFileSync(
+  writeTextFileSecure(
     input.outputPath,
     JSON.stringify(
       {
@@ -327,7 +330,6 @@ export function writeProjectConfig(input: {
       null,
       2,
     ) + "\n",
-    "utf8",
   );
 
   return {
@@ -353,7 +355,7 @@ export class VaultService {
         id: randomId(),
         message: "Vault initialized",
         metadata: JSON.stringify({ version: config.version }),
-        subjectRef: vaultPath,
+        subjectRef: null,
         subjectType: "vault",
       });
 
@@ -557,9 +559,8 @@ export class VaultSession {
       updatedAt: now,
       wrappedKey: JSON.stringify(wrappedKey),
     });
-    this.audit("secret.created", "secret", input.name, "Secret created", {
-      metadataKeys: Object.keys(normalizeMetadata(input.metadata)),
-      name: input.name,
+    this.audit("secret.created", "secret", id, "Secret created", {
+      metadataKeyCount: Object.keys(normalizeMetadata(input.metadata)).length,
       type,
     });
 
@@ -600,7 +601,6 @@ export class VaultSession {
 
     this.audit("import.legacy", "vault", null, "Legacy backup imported", {
       imported,
-      path: filePath,
       skipped,
     });
 
@@ -619,9 +619,8 @@ export class VaultSession {
 
   getSecret(ref: string): SecretRecord {
     const secret = this.getSecretOrThrow(ref);
-    this.audit("secret.read", "secret", secret.name, "Secret read", {
-      metadataKeys: Object.keys(secret.metadata),
-      name: secret.name,
+    this.audit("secret.read", "secret", secret.id, "Secret read", {
+      metadataKeyCount: Object.keys(secret.metadata).length,
       type: secret.type,
     });
 
@@ -631,8 +630,7 @@ export class VaultSession {
   removeSecret(ref: string): { id: string; name: string } {
     const secret = this.getSecretOrThrow(ref);
     this.db.deleteSecret(secret.id);
-    this.audit("secret.deleted", "secret", secret.name, "Secret deleted", {
-      name: secret.name,
+    this.audit("secret.deleted", "secret", secret.id, "Secret deleted", {
       type: secret.type,
     });
 
@@ -646,9 +644,8 @@ export class VaultSession {
     }
 
     const result = generateTotp(secret.value);
-    this.audit("otp.generated", "secret", secret.name, "OTP code generated", {
+    this.audit("otp.generated", "secret", secret.id, "OTP code generated", {
       expiresAt: result.expiresAt,
-      name: secret.name,
     });
 
     return {
@@ -692,7 +689,6 @@ export class VaultSession {
     });
     this.audit("lease.created", "lease", lease.id, "Lease created", {
       expiresAt,
-      name: lease.name,
       secretCount: lease.secretRefs.length,
     });
 
@@ -734,8 +730,8 @@ export class VaultSession {
   renderEnv(mappings: EnvMapping[], leaseId?: string): Record<string, string> {
     const env = this.buildEnv(mappings, leaseId);
     this.audit("env.rendered", "lease", leaseId ?? null, "Environment rendered", {
-      envKeys: Object.keys(env),
       leaseId: leaseId ?? null,
+      varCount: Object.keys(env).length,
     });
 
     return env;
@@ -765,13 +761,11 @@ export class VaultSession {
       "",
     ];
 
-    mkdirSync(dirname(input.outputPath), { recursive: true });
-    writeFileSync(input.outputPath, lines.join("\n"), "utf8");
+    writeTextFileSecure(input.outputPath, lines.join("\n"));
     this.audit("env.synced", "lease", input.leaseId ?? null, "Environment file written", {
-      envKeys: Object.keys(env),
       expiresAt,
       leaseId: input.leaseId ?? null,
-      outputPath: input.outputPath,
+      varCount: Object.keys(env).length,
     });
 
     return {
@@ -804,8 +798,8 @@ export class VaultSession {
     });
 
     this.audit("exec.run", "lease", input.leaseId ?? null, "Injected command executed", {
-      cmd: input.cmd,
-      envKeys: Object.keys(injectedEnv),
+      ...summarizeCommand(input.cmd),
+      envCount: Object.keys(injectedEnv).length,
       exitCode: result.status ?? 1,
       leaseId: input.leaseId ?? null,
     });
@@ -824,9 +818,8 @@ export class VaultSession {
       outputPath ?? defaultEncryptedFilePath(inputPath),
       this.rootKey,
     );
-    this.audit("file.encrypted", "artifact", result.outputPath, "File encrypted", {
-      inputPath,
-      outputPath: result.outputPath,
+    this.audit("file.encrypted", "artifact", null, "File encrypted", {
+      kind: "file",
     });
 
     return result;
@@ -839,9 +832,8 @@ export class VaultSession {
       outputPath ?? defaultDecryptedFilePath(inputPath),
       this.rootKey,
     );
-    this.audit("file.decrypted", "artifact", result.outputPath, "File decrypted", {
-      inputPath,
-      outputPath: result.outputPath,
+    this.audit("file.decrypted", "artifact", null, "File decrypted", {
+      kind: "file",
     });
 
     return result;
@@ -854,10 +846,9 @@ export class VaultSession {
       outputPath ?? defaultEncryptedFolderPath(inputPath),
       this.rootKey,
     );
-    this.audit("folder.encrypted", "artifact", result.outputPath, "Folder encrypted", {
+    this.audit("folder.encrypted", "artifact", null, "Folder encrypted", {
       fileCount: result.fileCount,
-      inputPath,
-      outputPath: result.outputPath,
+      kind: "folder",
     });
 
     return result;
@@ -870,10 +861,9 @@ export class VaultSession {
       outputPath ?? defaultDecryptedFolderPath(inputPath),
       this.rootKey,
     );
-    this.audit("folder.decrypted", "artifact", result.outputPath, "Folder decrypted", {
+    this.audit("folder.decrypted", "artifact", null, "Folder decrypted", {
       fileCount: result.fileCount,
-      inputPath,
-      outputPath: result.outputPath,
+      kind: "folder",
     });
 
     return result;
@@ -883,4 +873,10 @@ export class VaultSession {
     return this.db.listAudit(limit).map(toAuditEvent);
   }
 }
+
+
+
+
+
+
 
