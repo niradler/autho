@@ -2,16 +2,20 @@
 
 Autho is a local-first secret manager for humans and coding agents, rebuilt on Bun.
 
-This release is the Bun migration and legacy-parity cut. It keeps the existing core workflows, hardens the local vault design, and ships the current Bun CLI, daemon, and local web surface. It does not add new platform scope beyond parity and release hardening.
+## Install
+
+```bash
+bun install -g autho
+```
 
 ## What Ships In This Release
 
-- Password, note, and OTP secrets
+- Password, note, and OTP secrets (configurable algorithm and digits)
 - Interactive prompt workflow via `autho` with no arguments
 - Secret CRUD from the Bun CLI
-- OTP code generation
-- File encryption and decryption
-- Folder encryption and decryption
+- OTP code generation (RFC 6238 TOTP)
+- File encryption and decryption (with `--force` overwrite guard)
+- Folder encryption and decryption (with path traversal protection)
 - Legacy JSON import
 - Project secret mappings
 - `env render`, `env sync`, and `exec`
@@ -21,12 +25,16 @@ This release is the Bun migration and legacy-parity cut. It keeps the existing c
 
 ## Security Model
 
-- The master password is used only to derive a key-encryption key with `scrypt`
-- Each vault gets a random root key
-- Secret payloads and file artifacts use AES-256-GCM envelope encryption
-- The vault uses SQLite instead of the old `conf` store
-- Local daemon auth tokens are stored with `Bun.secrets` when the OS secret store is available
-- Audit events record access without storing secret values
+- Master password derives a key-encryption key via **scrypt** (N=2^17, r=8, p=1, OWASP minimum)
+- Each vault gets a random 256-bit root key
+- Secret payloads and file artifacts use **AES-256-GCM** envelope encryption with per-secret DEKs
+- Daemon bearer token comparison uses **timing-safe equality**
+- Web session cookies set **HttpOnly**, **SameSite=Strict**, and **Secure** flags
+- File and folder decrypt operations include **overwrite guards** (require `--force`)
+- Folder decryption validates paths against **directory traversal**
+- SQLite vault files are hardened to `0600` permissions
+- Local daemon auth tokens use OS secret storage when available (falls back to file)
+- Audit events record access patterns without storing secret values
 - Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
 
 Current at-rest boundary for this release:
@@ -121,6 +129,17 @@ Run the full quality gate:
 bun run check
 ```
 
+### npm Publish
+
+The CLI is published as `autho` on npm. To publish a new version:
+
+```bash
+bun run build:cli
+cd apps/cli && npm publish
+```
+
+The package includes only `dist/autho.js` and `README.md` (~15 KB tarball).
+
 ## Migration
 
 This Bun release supports migration from legacy JSON backups and documented manual migration from older `conf`-based installs. Direct in-product `conf` store migration is intentionally not part of this release.
@@ -159,6 +178,17 @@ bun test
 - `packages/storage`: SQLite access and migrations
 - `tests/e2e`: process-level user-flow tests
 
+## Agent Usage
+
+Autho is designed for coding agents that need secrets at runtime:
+
+```bash
+export AUTHO_MASTER_PASSWORD="..."
+autho lease create --secret github --secret openai --ttl 300 --json
+autho exec --lease <id> --map GITHUB_TOKEN=github --map OPENAI_KEY=openai -- node build.js
+autho lease revoke --lease <id>
+```
+
 ## Current Scope
 
-This release is intended to be stable for local-first Bun usage and parity with the legacy vault workflows. Planned future work such as proxy mode, richer agent policy management, and a fuller dashboard remains tracked in [plan.md](./plan.md) and is not part of this release cut.
+This release is intended to be stable for local-first Bun usage and parity with the legacy vault workflows. Planned future work such as proxy mode, richer agent policy management, and a fuller dashboard remains tracked in [`.codex-tmp/plan.md`](./.codex-tmp/plan.md) and is not part of this release cut.

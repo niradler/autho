@@ -2,11 +2,11 @@
 
 ## Mission
 
-This repository is being rewritten from a legacy secret vault into a modern local-first secret platform for humans and AI coding agents.
+Local-first secret manager for humans and AI coding agents, built on Bun.
 
-The current release target is narrower than the full plan: close the Bun migration, preserve the legacy feature set that already exists in the Bun codebase, keep the shipped flows stable, and avoid adding new product scope unless the task explicitly requires it.
+The v0.2 release is the hardened Bun rewrite: all legacy features ported, security reviewed, and published to npm as `autho`.
 
-Read [`plan.md`](./plan.md) before proposing architecture changes or new packages.
+Read [`.codex-tmp/plan.md`](./.codex-tmp/plan.md) before proposing architecture changes or new packages.
 
 ## Fast Context
 
@@ -47,6 +47,11 @@ Use them for patterns, not for copy-paste architecture decisions.
 ## What Must Not Regress
 
 - envelope encryption and SQLite storage
+- scrypt KDF at N=2^17 (OWASP minimum for secrets at rest)
+- timing-safe daemon token comparison
+- Secure, HttpOnly, SameSite=Strict session cookies
+- file/folder overwrite guards (require --force)
+- folder decrypt path traversal validation
 - Bun-first build, test, and bundle flow
 - process-level user-flow tests
 - prompt mode when running `autho` with no arguments
@@ -80,7 +85,7 @@ For local repo context:
 - `packages/crypto/src/index.ts`
 - `packages/storage/src/index.ts`
 - `tests/e2e/cli.test.ts`
-- `plan.md`
+- `.codex-tmp/plan.md`
 
 For reference patterns:
 
@@ -112,7 +117,7 @@ Get-Content packages\core\src\index.ts
 Get-Content packages\crypto\src\index.ts
 Get-Content packages\storage\src\index.ts
 Get-Content tests\e2e\cli.test.ts
-Get-Content plan.md
+Get-Content .codex-tmp\plan.md
 ```
 
 Reference repo checks:
@@ -132,15 +137,23 @@ Get-Content .codex-tmp\agent-secrets\cmd\secrets\exec.go
 - Keep human vault flows and agent-secret flows clearly separated.
 - For agent features, default to least privilege, TTLs, audit, and revocation.
 - Prefer non-exposure patterns when possible: proxy or broker over raw secret return.
-- If architecture direction changes materially, update `plan.md` first.
+- If architecture direction changes materially, update `.codex-tmp/plan.md` first.
 - If new reference repos are introduced, record why they matter and what pattern they contribute.
 - Treat Bun compatibility as a release requirement, not a secondary convenience.
+
+## npm Package
+
+The CLI is published as `autho` on npm from `apps/cli/`. Build with `bun run build:cli`, pack/publish from `apps/cli/`.
+
+## Known TODOs
+
+- File DEK AAD is static (`autho:file:dek`) — should be per-file for stronger binding (format-breaking, deferred to v0.3)
 
 ## Expected Deliverables In Future Passes
 
 Depending on the task, future work should usually update one or more of:
 
-- `plan.md`
+- `.codex-tmp/plan.md`
 - release or migration docs
 - typed packages for the new core
 - tests proving parity or safer agent behavior
@@ -148,6 +161,7 @@ Depending on the task, future work should usually update one or more of:
 
 ## Notes
 
-- `.codex-tmp` is for inspection only.
+- `.codex-tmp` holds reference repos and the active rewrite plan.
+- Use ORC CLI for task and knowledge tracking when it is installed in the environment; do not block work on ORC availability.
 - The current repo may be dirty. Do not revert unrelated user changes.
 - This project should stay easy for both humans and coding agents to operate safely.
