@@ -93,6 +93,14 @@ function required(value: string | undefined, label: string): string {
   return value;
 }
 
+function requirePositiveInt(value: string, label: string): number {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0 || Math.floor(num) !== num) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return num;
+}
+
 function output(value: unknown, jsonMode = false): void {
   if (jsonMode) {
     console.log(JSON.stringify(value, null, 2));
@@ -459,7 +467,7 @@ async function main(): Promise<void> {
     if (scope === "import" && action === "legacy") {
       output(
         session.importLegacyFile(absolutePath(required(getString(args, "file"), "--file")), {
-          skipExisting: getBoolean(args, "skip-existing") || !getBoolean(args, "no-skip-existing"),
+          skipExisting: !getBoolean(args, "no-skip-existing"),
         }),
         jsonMode,
       );
@@ -508,7 +516,7 @@ async function main(): Promise<void> {
         session.createLease({
           name: getString(args, "name") ?? "session",
           secretRefs: getStrings(args, "secret"),
-          ttlSeconds: Number(required(getString(args, "ttl"), "--ttl")),
+          ttlSeconds: requirePositiveInt(required(getString(args, "ttl"), "--ttl"), "--ttl"),
         }),
         jsonMode,
       );
@@ -544,7 +552,7 @@ async function main(): Promise<void> {
             projectFile,
           }),
           outputPath: absolutePath(getString(args, "output") ?? ".env.autho"),
-          ttlSeconds: getString(args, "ttl") ? Number(getString(args, "ttl")) : undefined,
+          ttlSeconds: getString(args, "ttl") ? requirePositiveInt(getString(args, "ttl") as string, "--ttl") : undefined,
         }),
         jsonMode,
       );

@@ -4,7 +4,7 @@ import {
   readFileSync,
   statSync,
 } from "node:fs";
-import { basename, join, relative } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 
 import {
   decryptWithKey,
@@ -170,9 +170,14 @@ export function decryptFolderArtifact(inputPath: string, outputPath: string, roo
     `autho:folder:dek:${envelope.rootName}`,
   );
 
+  const resolvedOutput = resolve(outputPath);
   ensurePrivateDir(outputPath);
   for (const entry of envelope.entries) {
     const destination = join(outputPath, entry.path);
+    const resolvedDest = resolve(destination);
+    if (!resolvedDest.startsWith(resolvedOutput + "/") && !resolvedDest.startsWith(resolvedOutput + "\\") && resolvedDest !== resolvedOutput) {
+      throw new Error(`Path traversal detected in folder artifact: ${entry.path}`);
+    }
     ensurePrivateParent(destination);
     const content = decryptWithKey(
       entry.payload,

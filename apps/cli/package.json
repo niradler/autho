@@ -1,6 +1,31 @@
 {
-  "name": "@autho/cli",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module"
+  "name": "autho",
+  "version": "0.2.0",
+  "description": "Local-first secret manager for humans and coding agents, rebuilt on Bun",
+  "type": "module",
+  "bin": {
+    "autho": "./dist/autho.js"
+  },
+  "files": [
+    "dist/autho.js"
+  ],
+  "engines": {
+    "bun": ">=1.3.10"
+  },
+  "keywords": [
+    "secrets",
+    "otp",
+    "bun",
+    "agent-secrets",
+    "secret-manager",
+    "vault",
+    "encryption"
+  ],
+  "author": "Nir Adler",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/niradler/autho.git",
+    "directory": "apps/cli"
+  }
 }

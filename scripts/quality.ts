@@ -87,7 +87,7 @@ function lintCheck(): void {
     if (/^<<<<<<<|^>>>>>>>/m.test(content)) {
       violations.push(`${relativePath}: merge conflict markers detected`);
     }
-    if (/@ts-ignore\\b/.test(content) && !relativePath.endsWith("scripts/quality.ts")) {
+    if (/@ts-ignore\b/.test(content) && !relativePath.endsWith("scripts/quality.ts")) {
       violations.push(`${relativePath}: @ts-ignore is not allowed`);
     }
     if (relativePath.startsWith("packages/") && /\bany\b/.test(content)) {
