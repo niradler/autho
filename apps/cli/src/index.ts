@@ -4,6 +4,16 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
+  daemonExec,
+  daemonLock,
+  daemonRenderEnv,
+  daemonStatus,
+  daemonStop,
+  daemonUnlock,
+  defaultDaemonStatePath,
+  startDaemonServer,
+} from "../../../packages/core/src/daemon.ts";
+import {
   VaultService,
   defaultProjectFilePath,
   defaultVaultPath,
@@ -123,6 +133,13 @@ function help(): string {
     "  init --password <value> [--vault <path>]",
     "  status [--password <value>] [--vault <path>] [--project-file <path>] [--json]",
     "  project init --map <ENV_NAME=secretRef> [--map <ENV_NAME=secretRef>] [--output <path>] [--force] [--json]",
+    "  daemon serve [--vault <path>] [--state-file <path>] [--host <value>] [--port <value>]",
+    "  daemon status [--state-file <path>] [--json]",
+    "  daemon unlock --password <value> [--ttl <seconds>] [--state-file <path>] [--json]",
+    "  daemon lock --session <id> [--state-file <path>] [--json]",
+    "  daemon stop [--state-file <path>] [--json]",
+    "  daemon env render --session <id> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--state-file <path>] [--json]",
+    "  daemon exec --session <id> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--state-file <path>] -- <command>",
     "  import legacy --password <value> --file <path> [--skip-existing] [--vault <path>] [--json]",
     "  secrets add --password <value> --name <name> --type <password|note|otp> --value <value> [--username <value>] [--url <value>] [--description <value>] [--digits <value>] [--algorithm <value>] [--vault <path>]",
     "  secrets list --password <value> [--vault <path>] [--json]",
@@ -143,15 +160,17 @@ function help(): string {
     "Notes:",
     "  The default vault path is ./.autho/vault.db",
     "  The default project file is ./.autho/project.json when it exists",
+    "  The default daemon state file is ./.autho/daemon.json",
     "  AUTHO_MASTER_PASSWORD can be used instead of --password",
   ].join("\n");
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const [scope, action] = args.positionals;
-  const json = getBoolean(args, "json");
+  const [scope, action, subaction] = args.positionals;
+  const jsonMode = getBoolean(args, "json");
   const vaultPath = getString(args, "vault") ?? defaultVaultPath();
+  const statePath = absolutePath(getString(args, "state-file") ?? defaultDaemonStatePath());
   const explicitProjectFile = getString(args, "project-file");
   const fallbackProjectFile = defaultProjectFilePath();
   const projectFile = explicitProjectFile ?? (existsSync(fallbackProjectFile) ? fallbackProjectFile : undefined);
@@ -163,8 +182,7 @@ async function main(): Promise<void> {
   }
 
   if (scope === "init") {
-    const result = VaultService.initialize(vaultPath, required(password, "--password"));
-    output(result, json);
+    output(VaultService.initialize(vaultPath, required(password, "--password")), jsonMode);
     return;
   }
 
@@ -174,7 +192,7 @@ async function main(): Promise<void> {
         password,
         projectFile,
       }),
-      json,
+      jsonMode,
     );
     return;
   }
@@ -183,14 +201,81 @@ async function main(): Promise<void> {
     output(
       writeProjectConfig({
         force: getBoolean(args, "force"),
-        mappings: resolveMappings({
-          maps: getStrings(args, "map"),
-        }),
+        mappings: resolveMappings({ maps: getStrings(args, "map") }),
         outputPath: absolutePath(getString(args, "output") ?? projectFile ?? defaultProjectFilePath()),
       }),
-      json,
+      jsonMode,
     );
     return;
+  }
+
+  if (scope === "daemon" && action === "serve") {
+    await startDaemonServer({
+      host: getString(args, "host") ?? "127.0.0.1",
+      port: Number(getString(args, "port") ?? "0"),
+      statePath,
+      vaultPath: absolutePath(vaultPath),
+    });
+    return;
+  }
+
+  if (scope === "daemon" && action === "status") {
+    output(await daemonStatus({ statePath }), jsonMode);
+    return;
+  }
+
+  if (scope === "daemon" && action === "unlock") {
+    output(
+      await daemonUnlock({
+        password: required(password, "--password"),
+        statePath,
+        ttlSeconds: getString(args, "ttl") ? Number(getString(args, "ttl")) : undefined,
+      }),
+      jsonMode,
+    );
+    return;
+  }
+
+  if (scope === "daemon" && action === "lock") {
+    output(
+      await daemonLock({
+        sessionId: required(getString(args, "session"), "--session"),
+        statePath,
+      }),
+      jsonMode,
+    );
+    return;
+  }
+
+  if (scope === "daemon" && action === "stop") {
+    output(await daemonStop({ statePath }), jsonMode);
+    return;
+  }
+
+  if (scope === "daemon" && action === "env" && subaction === "render") {
+    output(
+      await daemonRenderEnv({
+        leaseId: getString(args, "lease"),
+        mappings: resolveMappings({ maps: getStrings(args, "map"), projectFile }),
+        sessionId: required(getString(args, "session"), "--session"),
+        statePath,
+      }),
+      jsonMode,
+    );
+    return;
+  }
+
+  if (scope === "daemon" && action === "exec") {
+    const result = await daemonExec({
+      cmd: args.passthrough,
+      leaseId: getString(args, "lease"),
+      mappings: resolveMappings({ maps: getStrings(args, "map"), projectFile }),
+      sessionId: required(getString(args, "session"), "--session"),
+      statePath,
+    });
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    process.exit(result.exitCode);
   }
 
   const session = VaultService.unlock(vaultPath, required(password, "--password"));
@@ -201,7 +286,7 @@ async function main(): Promise<void> {
         session.importLegacyFile(absolutePath(required(getString(args, "file"), "--file")), {
           skipExisting: getBoolean(args, "skip-existing") || !getBoolean(args, "no-skip-existing"),
         }),
-        json,
+        jsonMode,
       );
       return;
     }
@@ -215,31 +300,31 @@ async function main(): Promise<void> {
           username: getString(args, "username"),
           value: required(getString(args, "value"), "--value"),
         }),
-        json,
+        jsonMode,
       );
       return;
     }
 
     if (scope === "secrets" && action === "list") {
-      output(session.listSecrets(), json);
+      output(session.listSecrets(), jsonMode);
       return;
     }
 
     if (scope === "secrets" && action === "get") {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
-      output(session.getSecret(required(ref, "--ref")), json);
+      output(session.getSecret(required(ref, "--ref")), jsonMode);
       return;
     }
 
     if (scope === "secrets" && action === "rm") {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
-      output(session.removeSecret(required(ref, "--ref")), json);
+      output(session.removeSecret(required(ref, "--ref")), jsonMode);
       return;
     }
 
     if (scope === "otp" && action === "code") {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
-      output(session.generateOtp(required(ref, "--ref")), json);
+      output(session.generateOtp(required(ref, "--ref")), jsonMode);
       return;
     }
 
@@ -250,16 +335,13 @@ async function main(): Promise<void> {
           secretRefs: getStrings(args, "secret"),
           ttlSeconds: Number(required(getString(args, "ttl"), "--ttl")),
         }),
-        json,
+        jsonMode,
       );
       return;
     }
 
     if (scope === "lease" && action === "revoke") {
-      output(
-        session.revokeLease(required(getString(args, "lease"), "--lease")),
-        json,
-      );
+      output(session.revokeLease(required(getString(args, "lease"), "--lease")), jsonMode);
       return;
     }
 
@@ -272,7 +354,7 @@ async function main(): Promise<void> {
           }),
           getString(args, "lease"),
         ),
-        json,
+        jsonMode,
       );
       return;
     }
@@ -289,7 +371,7 @@ async function main(): Promise<void> {
           outputPath: absolutePath(getString(args, "output") ?? ".env.autho"),
           ttlSeconds: getString(args, "ttl") ? Number(getString(args, "ttl")) : undefined,
         }),
-        json,
+        jsonMode,
       );
       return;
     }
@@ -314,7 +396,7 @@ async function main(): Promise<void> {
           absolutePath(required(getString(args, "input"), "--input")),
           getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
         ),
-        json,
+        jsonMode,
       );
       return;
     }
@@ -325,7 +407,7 @@ async function main(): Promise<void> {
           absolutePath(required(getString(args, "input"), "--input")),
           getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
         ),
-        json,
+        jsonMode,
       );
       return;
     }
@@ -336,7 +418,7 @@ async function main(): Promise<void> {
           absolutePath(required(getString(args, "input"), "--input")),
           getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
         ),
-        json,
+        jsonMode,
       );
       return;
     }
@@ -347,20 +429,17 @@ async function main(): Promise<void> {
           absolutePath(required(getString(args, "input"), "--input")),
           getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
         ),
-        json,
+        jsonMode,
       );
       return;
     }
 
     if (scope === "audit" && action === "list") {
-      output(
-        session.listAudit(Number(getString(args, "limit") ?? "50")),
-        json,
-      );
+      output(session.listAudit(Number(getString(args, "limit") ?? "50")), jsonMode);
       return;
     }
 
-    throw new Error(`Unknown command: ${[scope, action].filter(Boolean).join(" ")}`);
+    throw new Error(`Unknown command: ${[scope, action, subaction].filter(Boolean).join(" ")}`);
   } finally {
     session.close();
   }
