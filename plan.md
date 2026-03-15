@@ -384,7 +384,7 @@ The current implementation pass should establish:
 
 - a Bun-based workspace that can run, test, and bundle locally without pnpm-specific tooling
 - a secure local vault foundation using envelope encryption and SQLite
-- a CLI slice that covers vault setup, secret CRUD, OTP generation, env injection, `exec`, and audit visibility
+- a CLI slice that covers vault setup, secret CRUD, OTP generation, legacy JSON import, file and folder encryption, env injection, env-file sync, `exec`, and audit visibility
 - end-to-end tests that mimic user behavior through the CLI on disk, not only in-memory service tests
 
 ## Definition Of Done For The Rewrite

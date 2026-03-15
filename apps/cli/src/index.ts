@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+import { resolve } from "node:path";
+
 import {
   VaultService,
   defaultVaultPath,
@@ -95,13 +97,29 @@ function output(value: unknown, json = false): void {
   console.log(value);
 }
 
+function absolutePath(path: string): string {
+  return resolve(path);
+}
+
+function buildSecretMetadata(args: ParsedArgs): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries({
+      algorithm: getString(args, "algorithm"),
+      description: getString(args, "description"),
+      digits: getString(args, "digits") ? Number(getString(args, "digits")) : undefined,
+      url: getString(args, "url"),
+    }).filter(([, value]) => value !== undefined),
+  );
+}
+
 function help(): string {
   return [
     "Autho rewrite CLI",
     "",
     "Commands:",
     "  init --password <value> [--vault <path>]",
-    "  secrets add --password <value> --name <name> --type <password|note|otp> --value <value> [--username <value>] [--vault <path>]",
+    "  import legacy --password <value> --file <path> [--skip-existing] [--vault <path>] [--json]",
+    "  secrets add --password <value> --name <name> --type <password|note|otp> --value <value> [--username <value>] [--url <value>] [--description <value>] [--digits <value>] [--algorithm <value>] [--vault <path>]",
     "  secrets list --password <value> [--vault <path>] [--json]",
     "  secrets get --password <value> --ref <name-or-id> [--vault <path>] [--json]",
     "  secrets rm --password <value> --ref <name-or-id> [--vault <path>] [--json]",
@@ -109,7 +127,12 @@ function help(): string {
     "  lease create --password <value> --secret <name-or-id> [--secret <name-or-id>] --ttl <seconds> [--name <value>] [--vault <path>] [--json]",
     "  lease revoke --password <value> --lease <lease-id> [--vault <path>] [--json]",
     "  env render --password <value> --map <ENV_NAME=secretRef> [--map <ENV_NAME=secretRef>] [--project-file <path>] [--lease <lease-id>] [--vault <path>] [--json]",
+    "  env sync --password <value> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--ttl <seconds>] [--output <path>] [--force] [--vault <path>] [--json]",
     "  exec --password <value> --map <ENV_NAME=secretRef> [--project-file <path>] [--lease <lease-id>] [--vault <path>] -- <command>",
+    "  file encrypt --password <value> --input <path> [--output <path>] [--vault <path>] [--json]",
+    "  file decrypt --password <value> --input <path> [--output <path>] [--vault <path>] [--json]",
+    "  files encrypt --password <value> --input <path> [--output <path>] [--vault <path>] [--json]",
+    "  files decrypt --password <value> --input <path> [--output <path>] [--vault <path>] [--json]",
     "  audit list --password <value> [--limit <number>] [--vault <path>] [--json]",
     "",
     "Notes:",
@@ -139,9 +162,20 @@ async function main(): Promise<void> {
   const session = VaultService.unlock(vaultPath, required(password, "--password"));
 
   try {
+    if (scope === "import" && action === "legacy") {
+      output(
+        session.importLegacyFile(absolutePath(required(getString(args, "file"), "--file")), {
+          skipExisting: getBoolean(args, "skip-existing") || !getBoolean(args, "no-skip-existing"),
+        }),
+        json,
+      );
+      return;
+    }
+
     if (scope === "secrets" && action === "add") {
       output(
         session.addSecret({
+          metadata: buildSecretMetadata(args),
           name: required(getString(args, "name"), "--name"),
           type: required(getString(args, "type"), "--type"),
           username: getString(args, "username"),
@@ -209,6 +243,23 @@ async function main(): Promise<void> {
       return;
     }
 
+    if (scope === "env" && action === "sync") {
+      output(
+        session.syncEnvFile({
+          force: getBoolean(args, "force"),
+          leaseId: getString(args, "lease"),
+          mappings: resolveMappings({
+            maps: getStrings(args, "map"),
+            projectFile: getString(args, "project-file"),
+          }),
+          outputPath: absolutePath(getString(args, "output") ?? ".env.autho"),
+          ttlSeconds: getString(args, "ttl") ? Number(getString(args, "ttl")) : undefined,
+        }),
+        json,
+      );
+      return;
+    }
+
     if (scope === "exec") {
       const result = session.runExec({
         cmd: args.passthrough,
@@ -221,6 +272,50 @@ async function main(): Promise<void> {
       process.stdout.write(result.stdout);
       process.stderr.write(result.stderr);
       process.exit(result.exitCode);
+    }
+
+    if (scope === "file" && action === "encrypt") {
+      output(
+        session.encryptFile(
+          absolutePath(required(getString(args, "input"), "--input")),
+          getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
+        ),
+        json,
+      );
+      return;
+    }
+
+    if (scope === "file" && action === "decrypt") {
+      output(
+        session.decryptFile(
+          absolutePath(required(getString(args, "input"), "--input")),
+          getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
+        ),
+        json,
+      );
+      return;
+    }
+
+    if (scope === "files" && action === "encrypt") {
+      output(
+        session.encryptFolder(
+          absolutePath(required(getString(args, "input"), "--input")),
+          getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
+        ),
+        json,
+      );
+      return;
+    }
+
+    if (scope === "files" && action === "decrypt") {
+      output(
+        session.decryptFolder(
+          absolutePath(required(getString(args, "input"), "--input")),
+          getString(args, "output") ? absolutePath(getString(args, "output") as string) : undefined,
+        ),
+        json,
+      );
+      return;
     }
 
     if (scope === "audit" && action === "list") {

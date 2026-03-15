@@ -1,4 +1,10 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -68,6 +74,8 @@ describe("autho rewrite CLI", () => {
       "ghp_example_secret",
       "--username",
       "nirad",
+      "--url",
+      "https://github.com",
     ]) as { id: string; name: string };
 
     runCliJson([
@@ -83,6 +91,8 @@ describe("autho rewrite CLI", () => {
       "note",
       "--value",
       "ship the rewrite",
+      "--description",
+      "rewrite notes",
     ]);
 
     runCliJson([
@@ -98,6 +108,10 @@ describe("autho rewrite CLI", () => {
       "otp",
       "--value",
       "JBSWY3DPEHPK3PXP",
+      "--digits",
+      "6",
+      "--algorithm",
+      "SHA1",
     ]);
 
     const listed = runCliJson([
@@ -120,9 +134,10 @@ describe("autho rewrite CLI", () => {
       password,
       "--ref",
       "github",
-    ]) as { username: string; value: string };
+    ]) as { metadata: { url: string }; username: string; value: string };
     expect(fetched.username).toBe("nirad");
     expect(fetched.value).toBe("ghp_example_secret");
+    expect(fetched.metadata.url).toBe("https://github.com");
 
     const otp = runCliJson([
       "otp",
@@ -167,6 +182,27 @@ describe("autho rewrite CLI", () => {
     ]) as Record<string, string>;
     expect(envRender.AUTHO_PASSWORD).toBe("ghp_example_secret");
     expect(envRender.AUTHO_NOTE).toBe("ship the rewrite");
+
+    const envFile = join(tempRoot, ".env.autho");
+    const syncResult = runCliJson([
+      "env",
+      "sync",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--lease",
+      lease.id,
+      "--project-file",
+      projectFile,
+      "--output",
+      envFile,
+      "--ttl",
+      "60",
+    ]) as { outputPath: string; varCount: number };
+    expect(syncResult.outputPath).toBe(envFile);
+    expect(syncResult.varCount).toBe(2);
+    expect(readFileSync(envFile, "utf8")).toContain('AUTHO_PASSWORD="ghp_example_secret"');
 
     const execResult = runCli([
       "exec",
@@ -222,7 +258,7 @@ describe("autho rewrite CLI", () => {
       "--password",
       password,
       "--limit",
-      "20",
+      "30",
     ]) as Array<{ eventType: string }>;
     expect(audit.map((event) => event.eventType)).toEqual(
       expect.arrayContaining([
@@ -231,6 +267,7 @@ describe("autho rewrite CLI", () => {
         "otp.generated",
         "lease.created",
         "env.rendered",
+        "env.synced",
         "exec.run",
         "lease.revoked",
       ]),
@@ -247,5 +284,167 @@ describe("autho rewrite CLI", () => {
       passwordSecret.id,
     ]) as { name: string };
     expect(remove.name).toBe("github");
+  });
+
+  test("covers legacy import and secure file or folder encryption flows", () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-artifacts-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const password = "correct horse battery staple";
+    const legacyFile = join(tempRoot, "legacy.json");
+    const plainFile = join(tempRoot, "sample.txt");
+    const encryptedFile = join(tempRoot, "sample.txt.autho");
+    const decryptedFile = join(tempRoot, "sample-copy.txt");
+    const sourceFolder = join(tempRoot, "folder");
+    const restoredFolder = join(tempRoot, "restored-folder");
+    const encryptedFolder = join(tempRoot, "folder.autho-folder");
+
+    writeFileSync(
+      legacyFile,
+      JSON.stringify(
+        [
+          {
+            description: "GitHub access token",
+            name: "imported-password",
+            secret: "ghp_imported",
+            type: "password",
+            url: "https://github.com",
+            username: "octocat",
+          },
+          {
+            description: "Imported note",
+            name: "imported-note",
+            secret: "note body",
+            type: "note",
+          },
+          {
+            algorithm: "SHA1",
+            digits: 6,
+            name: "imported-otp",
+            secret: "JBSWY3DPEHPK3PXP",
+            type: "otp",
+            username: "otp-user",
+          },
+        ],
+        null,
+        2,
+      ),
+    );
+    writeFileSync(plainFile, "hello secure world", "utf8");
+    mkdirSync(join(sourceFolder, "nested"), { recursive: true });
+    writeFileSync(join(sourceFolder, "a.txt"), "alpha", "utf8");
+    writeFileSync(join(sourceFolder, "nested", "b.txt"), "beta", "utf8");
+
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
+
+    const imported = runCliJson([
+      "import",
+      "legacy",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--file",
+      legacyFile,
+      "--skip-existing",
+    ]) as { imported: number; skipped: number };
+    expect(imported.imported).toBe(3);
+    expect(imported.skipped).toBe(0);
+
+    const importedSecret = runCliJson([
+      "secrets",
+      "get",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--ref",
+      "imported-password",
+    ]) as { metadata: { description: string; url: string }; username: string; value: string };
+    expect(importedSecret.username).toBe("octocat");
+    expect(importedSecret.value).toBe("ghp_imported");
+    expect(importedSecret.metadata.description).toBe("GitHub access token");
+    expect(importedSecret.metadata.url).toBe("https://github.com");
+
+    const fileEncrypt = runCliJson([
+      "file",
+      "encrypt",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--input",
+      plainFile,
+      "--output",
+      encryptedFile,
+    ]) as { outputPath: string };
+    expect(fileEncrypt.outputPath).toBe(encryptedFile);
+    expect(existsSync(encryptedFile)).toBe(true);
+    expect(readFileSync(encryptedFile, "utf8")).not.toContain("hello secure world");
+
+    const fileDecrypt = runCliJson([
+      "file",
+      "decrypt",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--input",
+      encryptedFile,
+      "--output",
+      decryptedFile,
+    ]) as { outputPath: string };
+    expect(fileDecrypt.outputPath).toBe(decryptedFile);
+    expect(readFileSync(decryptedFile, "utf8")).toBe("hello secure world");
+
+    const folderEncrypt = runCliJson([
+      "files",
+      "encrypt",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--input",
+      sourceFolder,
+      "--output",
+      encryptedFolder,
+    ]) as { fileCount: number; outputPath: string };
+    expect(folderEncrypt.fileCount).toBe(2);
+    expect(folderEncrypt.outputPath).toBe(encryptedFolder);
+
+    const folderDecrypt = runCliJson([
+      "files",
+      "decrypt",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--input",
+      encryptedFolder,
+      "--output",
+      restoredFolder,
+    ]) as { fileCount: number; outputPath: string };
+    expect(folderDecrypt.fileCount).toBe(2);
+    expect(readFileSync(join(restoredFolder, "a.txt"), "utf8")).toBe("alpha");
+    expect(readFileSync(join(restoredFolder, "nested", "b.txt"), "utf8")).toBe("beta");
+
+    const audit = runCliJson([
+      "audit",
+      "list",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--limit",
+      "30",
+    ]) as Array<{ eventType: string }>;
+    expect(audit.map((event) => event.eventType)).toEqual(
+      expect.arrayContaining([
+        "import.legacy",
+        "file.encrypted",
+        "file.decrypted",
+        "folder.encrypted",
+        "folder.decrypted",
+      ]),
+    );
   });
 });
