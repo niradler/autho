@@ -181,12 +181,11 @@ function buildDescription(s: SecretRecord, availableWidth: number): string {
   // Try adding description
   const note = s.metadata?.description ? String(s.metadata.description) : "";
   if (note) {
-    const withNote = `${desc} — ${note}`;
+    const withNote = `${desc} · ${note}`;
     if (withNote.length <= availableWidth) {
       desc = withNote;
     } else {
-      // Truncate description to fit
-      const budget = availableWidth - desc.length - 5; // " — " + "…"
+      const budget = availableWidth - desc.length - 5;
       if (budget > 5) {
         desc = `${desc} — ${note.slice(0, budget)}…`;
       }
@@ -298,7 +297,7 @@ function HomeScreen({ session, onSelect, onCreate, toast }: {
           onChange={setQuery}
           placeholder="/ search..."
           focused={searchFocused}
-          width={40}
+          flexGrow={1}
           backgroundColor="#111111"
           focusedBackgroundColor="#1a1a1a"
           textColor="#FFFFFF"
@@ -340,7 +339,9 @@ function DetailScreen({ session, secret, onBack, onDeleted, onEdit }: {
   onDeleted: (msg: string) => void;
   onEdit: () => void;
 }) {
+  const renderer = useRenderer();
   const [revealing, setRevealing] = useState(false);
+  const [copied, setCopied] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [otpResult, setOtpResult] = useState<{ code: string; expiresAt: string } | null>(null);
   const [otpCountdown, setOtpCountdown] = useState(0);
@@ -397,6 +398,17 @@ function DetailScreen({ session, secret, onBack, onDeleted, onEdit }: {
       if (confirmDelete) { setConfirmDelete(false); return; }
       if (otpResult) { setOtpResult(null); return; }
       onBack();
+      return;
+    }
+
+    // 'c' to copy value to clipboard
+    if (key.name === "c" && !confirmDelete) {
+      const toCopy = otpResult ? otpResult.code : (detail.value ?? "");
+      if (toCopy) {
+        renderer.copyToClipboardOSC52(toCopy);
+        setCopied(otpResult ? "OTP code" : "Value");
+        setTimeout(() => setCopied(""), 2000);
+      }
       return;
     }
 
@@ -483,7 +495,7 @@ function DetailScreen({ session, secret, onBack, onDeleted, onEdit }: {
   }
 
   // Build status bar hints
-  const hints = ["Hold s reveal", "e edit", "d delete"];
+  const hints = ["Hold s reveal", "c copy", "e edit", "d delete"];
   if (isOtp) hints.push(otpResult ? "r regen" : "o OTP");
   hints.push("Esc back");
 
@@ -493,7 +505,7 @@ function DetailScreen({ session, secret, onBack, onDeleted, onEdit }: {
 
       <box flexDirection="column" flexGrow={1} padding={2} gap={1}>
         {/* Secret info card */}
-        <box flexDirection="column" border borderStyle="rounded" borderColor="#333333" padding={1} gap={0}>
+        <box flexDirection="column" border borderStyle="rounded" borderColor="#333333" padding={1} gap={0} width="100%">
           <KeyValue label="Name" value={detail.name} valueColor="#FFD700" />
           <KeyValue label="Type" value={typeLabel(detail.type)} />
           <KeyValue label="ID" value={detail.id} valueColor="#555555" />
@@ -522,8 +534,12 @@ function DetailScreen({ session, secret, onBack, onDeleted, onEdit }: {
 
         {error ? <text fg="#FF4444">{error}</text> : null}
 
+        {/* Copied toast */}
+        {copied ? <text fg="#00CC66">{copied} copied to clipboard</text> : null}
+
         {/* Action hints */}
         <box flexDirection="row" gap={3} marginTop={1}>
+          <text fg="#00CC66">[c] Copy</text>
           <text fg="#FFD700">[e] Edit</text>
           <text fg="#FF4444">[d] Delete</text>
           {isOtp ? <text fg="#00CCFF">[o] Generate OTP</text> : null}
@@ -611,7 +627,7 @@ function CreateScreen({ session, onDone, onBack }: {
     <box flexDirection="row" gap={1}>
       <text fg="#AAAAAA" width={12}>{label}</text>
       <input value={val} onChange={onChange} onSubmit={onSubmit}
-        placeholder={placeholder} focused width={40}
+        placeholder={placeholder} focused flexGrow={1}
         backgroundColor="#111111" focusedBackgroundColor="#1a1a1a" textColor="#FFFFFF" />
     </box>
   );
@@ -761,61 +777,10 @@ function EditScreen({ session, secret, onDone, onBack }: {
     description: detail.metadata?.description ? String(detail.metadata.description) : "",
   });
   const [inputVal, setInputVal] = useState("");
+  const inputValRef = useRef("");
+  const [editGeneration, setEditGeneration] = useState(0);
 
-  useKeyboard((key) => {
-    if (key.eventType !== "press") return;
-    if (key.name === "escape") {
-      if (editing) {
-        setEditing(null);
-      } else {
-        onBack();
-      }
-    }
-  });
-
-  // Editing a single field
-  if (editing) {
-    const fieldDef = fields.find((f) => f.key === editing);
-    return (
-      <box flexDirection="column" width="100%" height="100%">
-        <Header title={`Edit ${fieldDef?.label ?? editing}`} subtitle={detail.name} />
-        <box padding={2} flexDirection="column" gap={1}>
-          <text fg="#888888">Current: <span fg="#555555">{values[editing] || "(empty)"}</span></text>
-          <box flexDirection="row" gap={1}>
-            <text fg="#AAAAAA" width={12}>New value</text>
-            <input
-              value={inputVal}
-              onChange={setInputVal}
-              onSubmit={() => {
-                setValues((v) => ({ ...v, [editing]: inputVal }));
-                setEditing(null);
-                setInputVal("");
-              }}
-              placeholder={values[editing] || "enter new value..."}
-              focused
-              width={40}
-              backgroundColor="#111111"
-              focusedBackgroundColor="#1a1a1a"
-              textColor="#FFFFFF"
-            />
-          </box>
-        </box>
-        <StatusBar message="Enter save field  Esc cancel" />
-      </box>
-    );
-  }
-
-  // Field list + save
-  const options = [
-    ...fields.map((f) => ({
-      name: `${f.label}: ${f.key === "value" ? (values[f.key] ? "***" : "(empty)") : (values[f.key] || "(empty)")}`,
-      description: "Edit this field",
-      value: f.key,
-    })),
-    { name: "Save changes", description: "Write to vault", value: "__save__" },
-  ];
-
-  const doSave = () => {
+  const doSave = useCallback(() => {
     try {
       const updates: Record<string, string | Record<string, unknown>> = {};
       if (values.name !== detail.name) updates.name = values.name;
@@ -838,7 +803,75 @@ function EditScreen({ session, secret, onDone, onBack }: {
     } catch (e) {
       onDone(`Error: ${e instanceof Error ? e.message : String(e)}`);
     }
-  };
+  }, [values, detail, session, onDone]);
+
+  useKeyboard((key) => {
+    if (key.eventType !== "press") return;
+    if (key.name === "escape") {
+      if (editing) {
+        setEditing(null);
+      } else {
+        onBack();
+      }
+    }
+    // Ctrl+S to save from field list
+    if (key.ctrl && key.name === "s" && !editing) {
+      doSave();
+    }
+  });
+
+  // Editing a single field
+  if (editing) {
+    const fieldDef = fields.find((f) => f.key === editing);
+    return (
+      <box flexDirection="column" width="100%" height="100%">
+        <Header title={`Edit ${fieldDef?.label ?? editing}`} subtitle={detail.name} />
+        <box padding={2} flexDirection="column" gap={1}>
+          <text fg="#888888">Current: <span fg="#555555">{values[editing] || "(empty)"}</span></text>
+          <box flexDirection="row" gap={1}>
+            <text fg="#AAAAAA" width={12}>New value</text>
+            <input
+              value={inputVal}
+              onChange={(v: string) => { setInputVal(v); inputValRef.current = v; }}
+              onSubmit={() => {
+                const saved = inputValRef.current;
+                const field = editing;
+                if (field) {
+                  setValues((prev) => ({ ...prev, [field]: saved }));
+                }
+                setEditing(null);
+                setInputVal("");
+                inputValRef.current = "";
+                setEditGeneration((g) => g + 1);
+              }}
+              placeholder={values[editing] || "enter new value..."}
+              focused
+              flexGrow={1}
+              backgroundColor="#111111"
+              focusedBackgroundColor="#1a1a1a"
+              textColor="#FFFFFF"
+            />
+          </box>
+        </box>
+        <StatusBar message="Enter save field  Esc cancel" />
+      </box>
+    );
+  }
+
+  // Field list
+  const options = fields.map((f) => {
+    let display: string;
+    if (f.key === "value") {
+      display = values[f.key] ? "***" : "(empty)";
+    } else {
+      display = values[f.key] || "(empty)";
+    }
+    return {
+      name: `${f.label}: ${display}`,
+      description: "Enter to edit",
+      value: f.key,
+    };
+  });
 
   return (
     <box flexDirection="column" width="100%" height="100%">
@@ -846,14 +879,13 @@ function EditScreen({ session, secret, onDone, onBack }: {
       <box flexGrow={1} paddingX={2} paddingTop={1}>
         <select
           options={options}
+          key={editGeneration}
           onSelect={(_i: number, opt: { value?: string }) => {
             const val = opt.value ?? "";
-            if (val === "__save__") {
-              doSave();
-            } else {
-              setEditing(val as EditField);
-              setInputVal(values[val] ?? "");
-            }
+            const current = values[val] ?? "";
+            setEditing(val as EditField);
+            setInputVal(current);
+            inputValRef.current = current;
           }}
           focused
           height={Math.min(options.length * 2 + 1, 14)}
@@ -861,7 +893,17 @@ function EditScreen({ session, secret, onDone, onBack }: {
           selectedTextColor="#FFD700"
         />
       </box>
-      <StatusBar message="Enter edit field / save  Esc back" />
+      <box paddingX={2} paddingBottom={1}>
+        <box
+          border borderStyle="rounded" borderColor="#FFD700"
+          paddingX={2} height={3}
+          flexDirection="row" alignItems="center" gap={2}
+          onMouseDown={doSave}
+        >
+          <text fg="#FFD700"><strong>Ctrl+S Save</strong></text>
+        </box>
+      </box>
+      <StatusBar message="Enter edit field  Ctrl+S save  Esc back" />
     </box>
   );
 }
