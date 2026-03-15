@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+bun run format
+bun run lint
+bun run typecheck
+bun run test:v2

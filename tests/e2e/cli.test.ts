@@ -34,6 +34,17 @@ function runCliJson(args: string[]) {
   return JSON.parse(result.stdout) as unknown;
 }
 
+async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await check()) {
+      return;
+    }
+    await Bun.sleep(100);
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
 describe("autho rewrite CLI", () => {
   test("covers init, project config, status, secret CRUD, otp, lease, env, exec, audit, and revoke flows", () => {
     const tempRoot = mkdtempSync(join(tmpdir(), "autho-e2e-"));
@@ -478,5 +489,161 @@ describe("autho rewrite CLI", () => {
         "folder.decrypted",
       ]),
     );
+  });
+
+  test("covers daemon-backed unlock, env render, exec, lock, and stop flows", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-daemon-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const projectFile = join(tempRoot, ".autho", "project.json");
+    const stateFile = join(tempRoot, ".autho", "daemon.json");
+    const password = "correct horse battery staple";
+
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
+    runCliJson([
+      "project",
+      "init",
+      "--output",
+      projectFile,
+      "--map",
+      "AUTHO_PASSWORD=github",
+      "--map",
+      "AUTHO_NOTE=memo",
+      "--force",
+    ]);
+    runCliJson([
+      "secrets",
+      "add",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--name",
+      "github",
+      "--type",
+      "password",
+      "--value",
+      "ghp_example_secret",
+    ]);
+    runCliJson([
+      "secrets",
+      "add",
+      "--vault",
+      vaultPath,
+      "--password",
+      password,
+      "--name",
+      "memo",
+      "--type",
+      "note",
+      "--value",
+      "ship the rewrite",
+    ]);
+
+    const daemon = Bun.spawn({
+      cmd: [
+        "bun",
+        "run",
+        "./apps/daemon/src/index.ts",
+        "serve",
+        "--vault",
+        vaultPath,
+        "--state-file",
+        stateFile,
+        "--port",
+        "0",
+      ],
+      cwd: repoRoot,
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+
+    try {
+      await waitFor(() => existsSync(stateFile));
+      await waitFor(() => runCli(["daemon", "status", "--state-file", stateFile]).exitCode === 0);
+
+      const daemonStatus = runCliJson([
+        "daemon",
+        "status",
+        "--state-file",
+        stateFile,
+      ]) as { activeSessions: number; status: { initialized: boolean } };
+      expect(daemonStatus.activeSessions).toBe(0);
+      expect(daemonStatus.status.initialized).toBe(true);
+
+      const unlocked = runCliJson([
+        "daemon",
+        "unlock",
+        "--state-file",
+        stateFile,
+        "--password",
+        password,
+        "--ttl",
+        "120",
+      ]) as { expiresAt: string; sessionId: string };
+      expect(unlocked.sessionId.length).toBeGreaterThan(10);
+      expect(unlocked.expiresAt).toContain("T");
+
+      const envRender = runCliJson([
+        "daemon",
+        "env",
+        "render",
+        "--state-file",
+        stateFile,
+        "--session",
+        unlocked.sessionId,
+        "--project-file",
+        projectFile,
+      ]) as Record<string, string>;
+      expect(envRender.AUTHO_PASSWORD).toBe("ghp_example_secret");
+      expect(envRender.AUTHO_NOTE).toBe("ship the rewrite");
+
+      const execResult = runCli([
+        "daemon",
+        "exec",
+        "--state-file",
+        stateFile,
+        "--session",
+        unlocked.sessionId,
+        "--project-file",
+        projectFile,
+        "--",
+        "bun",
+        "-e",
+        "process.stdout.write(process.env.AUTHO_PASSWORD + ':' + process.env.AUTHO_NOTE)",
+      ]);
+      expect(execResult.exitCode).toBe(0);
+      expect(execResult.stdout).toBe("ghp_example_secret:ship the rewrite");
+
+      expect(
+        runCli([
+          "daemon",
+          "lock",
+          "--state-file",
+          stateFile,
+          "--session",
+          unlocked.sessionId,
+        ]).exitCode,
+      ).toBe(0);
+
+      const lockedEnv = runCli([
+        "daemon",
+        "env",
+        "render",
+        "--state-file",
+        stateFile,
+        "--session",
+        unlocked.sessionId,
+        "--project-file",
+        projectFile,
+      ]);
+      expect(lockedEnv.exitCode).toBe(1);
+      expect(lockedEnv.stderr).toContain("Unknown daemon session");
+
+      expect(runCli(["daemon", "stop", "--state-file", stateFile]).exitCode).toBe(0);
+      await waitFor(() => !existsSync(stateFile));
+    } finally {
+      daemon.kill();
+      await daemon.exited;
+    }
   });
 });
