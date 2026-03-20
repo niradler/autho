@@ -558,15 +558,12 @@ export class VaultService {
   }
 
   static generateRecovery(vaultPath: string, credentials: UnlockCredentials): { token: string; fileContent: string } {
-    // Verify credentials (throws if wrong)
     const session = VaultService.unlock(vaultPath, credentials);
+    const rootKey = session.getRootKey();
     session.close();
 
     const db = new AuthoDatabase(vaultPath);
     try {
-      const config = db.getVaultConfig()!;
-      const rootKey = unlockRootKey(credentials.password, config);
-
       const tokenBytes = randomBytes(32);
       const token = tokenBytes.toString("hex");
 
@@ -659,6 +656,10 @@ export class VaultSession {
     private readonly db: AuthoDatabase,
     private readonly rootKey: Buffer,
   ) {}
+
+  getRootKey(): Buffer {
+    return this.rootKey;
+  }
 
   close(): void {
     this.db.close();
