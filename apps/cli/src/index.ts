@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
 import { readPasswordMasked } from "./password.ts";
@@ -18,11 +18,23 @@ import {
 } from "../../../packages/core/src/daemon.ts";
 import {
   VaultService,
+  type UnlockCredentials,
   defaultProjectFilePath,
   defaultVaultPath,
   resolveMappings,
   writeProjectConfig,
 } from "../../../packages/core/src/index.ts";
+import {
+  deleteOsSecret,
+  getOsSecret,
+  hasPinSet,
+  loadVaultPassword,
+  setOsSecret,
+  storePinHash,
+  storeVaultPassword,
+  verifyPin,
+  deletePin,
+} from "../../../packages/core/src/os-secrets.ts";
 
 type ParsedArgs = {
   options: Record<string, boolean | string | string[]>;
@@ -262,6 +274,122 @@ async function runPromptMode(vaultPath: string, initialPassword?: string): Promi
     prompt.close();
   }
 }
+async function resolveUnlockCredentials(
+  vaultPath: string,
+  args: ParsedArgs,
+  existingPassword?: string,
+): Promise<UnlockCredentials> {
+  // Password: --password > AUTHO_MASTER_PASSWORD > OS keychain > interactive prompt
+  let password = existingPassword ?? getString(args, "password") ?? process.env.AUTHO_MASTER_PASSWORD;
+  if (!password) {
+    password = (await loadVaultPassword(vaultPath)) ?? undefined;
+  }
+  if (!password && process.stdin.isTTY) {
+    password = await readPasswordMasked("Master password: ");
+  }
+
+  const creds: UnlockCredentials = { password: required(password, "--password") };
+
+  // PIN check (if set on this machine)
+  if (await hasPinSet(vaultPath)) {
+    const pin = process.stdin.isTTY
+      ? await readPasswordMasked("PIN: ")
+      : getString(args, "pin");
+    if (!pin) throw new Error("PIN is set on this vault — provide it interactively or with --pin");
+    const ok = await verifyPin(vaultPath, pin);
+    if (!ok) throw new Error("Wrong PIN");
+  }
+
+  // TOTP check (if enabled in vault)
+  const authConfig = VaultService.getAuthConfig(vaultPath);
+  if (authConfig?.totp) {
+    const totp = process.stdin.isTTY
+      ? await readPasswordMasked("Authenticator code: ")
+      : getString(args, "totp");
+    if (!totp) throw new Error("TOTP is enabled — provide a 6-digit code interactively or with --totp");
+    creds.totp = totp;
+  }
+
+  return creds;
+}
+
+async function runInitWizard(vaultPath: string, password: string, existingCreds?: UnlockCredentials): Promise<void> {
+  const isReconfigure = existingCreds !== undefined;
+  const creds: UnlockCredentials = existingCreds ?? { password };
+
+  while (true) {
+    const authConfig = VaultService.getAuthConfig(vaultPath);
+    const pinSet = await hasPinSet(vaultPath);
+    const totpEnabled = authConfig?.totp !== undefined;
+
+    console.log("");
+    if (isReconfigure) {
+      console.log("Security factors:");
+    } else {
+      console.log("Configure security factors (you can change these anytime with: autho init)");
+    }
+    console.log(`  [P] PIN  — ${pinSet ? "SET on this machine" : "not set"}   → toggle`);
+    console.log(`  [T] TOTP — ${totpEnabled ? "ENABLED" : "not enabled"}   → toggle`);
+    console.log("  [S] Done");
+    console.log("");
+
+    const choice = (await readPasswordMasked("Choice [P/T/S]: ")).trim().toUpperCase();
+
+    if (choice === "S" || choice === "") {
+      console.log("Security configuration complete.");
+      break;
+    }
+
+    if (choice === "P") {
+      if (pinSet) {
+        // Remove PIN
+        const confirmPin = await readPasswordMasked("Enter current PIN to confirm removal: ");
+        const ok = await verifyPin(vaultPath, confirmPin);
+        if (!ok) { console.log("Wrong PIN, not removed."); continue; }
+        await deletePin(vaultPath);
+        console.log("PIN removed from this machine.");
+      } else {
+        // Set PIN
+        const newPin = await readPasswordMasked("New PIN: ");
+        if (!newPin) { console.log("PIN cannot be empty."); continue; }
+        const confirmPin = await readPasswordMasked("Confirm PIN: ");
+        if (newPin !== confirmPin) { console.log("PINs do not match."); continue; }
+        await storePinHash(vaultPath, newPin);
+        console.log("PIN set. You will be prompted for it on this machine before unlocking.");
+      }
+    } else if (choice === "T") {
+      if (totpEnabled) {
+        // Remove TOTP
+        const totpCode = await readPasswordMasked("Enter current TOTP code to confirm removal: ");
+        const removeCreds: UnlockCredentials = { ...creds, totp: totpCode };
+        try {
+          VaultService.removeTotp(vaultPath, removeCreds);
+          console.log("TOTP disabled.");
+        } catch (e) {
+          console.log(`Error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      } else {
+        // Enable TOTP
+        const { secret, uri } = VaultService.setupTotp(vaultPath);
+        console.log("");
+        console.log("TOTP Secret:", secret);
+        console.log("Scan in your authenticator app:");
+        console.log(uri);
+        console.log("");
+        const code = await readPasswordMasked("Enter the 6-digit code to confirm: ");
+        try {
+          VaultService.enableTotp(vaultPath, creds, secret, code);
+          console.log("TOTP enabled. You will need your authenticator app to unlock this vault.");
+        } catch (e) {
+          console.log(`Error: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    } else {
+      console.log("Unknown choice. Enter P, T, or S.");
+    }
+  }
+}
+
 async function runWebServer(vaultPath: string, args: ParsedArgs): Promise<void> {
   const commandArgs = [
     "run",
@@ -334,14 +462,29 @@ function help(): string {
     "  files encrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
     "  files decrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
     "  audit list [--limit <number>] [--vault <path>] [--json]",
+    "  recovery generate --output <path> [--vault <path>] [--json]",
+    "  recovery revoke [--vault <path>] [--json]",
+    "  unlock --recovery-file <path> [--vault <path>] [--json]",
+    "  os-secrets set --name <name> [--value <value>] [--json]",
+    "  os-secrets get --name <name> [--json]",
+    "  os-secrets delete --name <name> [--json]",
     "",
     "Authentication:",
     "  When running interactively (TTY), you will be securely prompted for your",
     "  master password with masked input (no --password flag needed).",
     "",
     "  For automation and coding agents, use one of:",
-    "    AUTHO_MASTER_PASSWORD=<value>    Environment variable (recommended for agents)",
+    "    autho init (or rerun)             Stores master password in the native OS secret store automatically",
+    "    AUTHO_MASTER_PASSWORD=<value>    Environment variable",
     "    --password <value>               CLI flag (visible in shell history - avoid!)",
+    "",
+    "  Native OS secret store support (via Bun.secrets):",
+    "    macOS   → Keychain Services",
+    "    Linux   → libsecret / GNOME Keyring / KWallet",
+    "    Windows → Windows Credential Manager",
+    "",
+    "  The OS secret store is checked automatically before prompting.",
+    "  Set AUTHO_DISABLE_OS_SECRETS=1 to opt out.",
     "",
     "Notes:",
     "  Running `autho` with no arguments opens the interactive TUI.",
@@ -361,6 +504,11 @@ async function main(): Promise<void> {
   const fallbackProjectFile = defaultProjectFilePath();
   const projectFile = explicitProjectFile ?? (existsSync(fallbackProjectFile) ? fallbackProjectFile : undefined);
   let password = getString(args, "password") ?? process.env.AUTHO_MASTER_PASSWORD;
+
+  // Fall back to OS secret store before prompting interactively
+  if (!password) {
+    password = (await loadVaultPassword(vaultPath)) ?? undefined;
+  }
 
   if (!scope) {
     // TUI mode when running interactively with no args
@@ -387,8 +535,8 @@ async function main(): Promise<void> {
   // Auto-prompt for password when running interactively and no --password/env var
   if (!password && process.stdin.isTTY) {
     const needsPassword = [
-      "init", "secrets", "otp", "lease", "env", "exec",
-      "file", "files", "audit", "import",
+      "secrets", "otp", "lease", "env", "exec",
+      "file", "files", "audit", "import", "recovery", "unlock",
     ].includes(scope);
     const daemonNeedsPassword = scope === "daemon" && action === "unlock";
     if (needsPassword || daemonNeedsPassword) {
@@ -397,7 +545,31 @@ async function main(): Promise<void> {
   }
 
   if (scope === "init") {
-    output(VaultService.initialize(vaultPath, required(password, "--password")), jsonMode);
+    const existingStatus = VaultService.status(vaultPath);
+
+    if (!existingStatus.initialized) {
+      // First run: create vault
+      const pw = required(password, "--password");
+      output(VaultService.initialize(vaultPath, pw), jsonMode);
+      const stored = await storeVaultPassword(vaultPath, pw);
+      if (stored && !jsonMode) {
+        console.log("Master password saved to OS secret store. You won't be prompted again on this machine.");
+      }
+
+      // Security wizard (TTY only, not in --json mode)
+      if (process.stdin.isTTY && !jsonMode) {
+        await runInitWizard(vaultPath, pw);
+      }
+    } else {
+      // Reconfigure: full security check first
+      const creds = await resolveUnlockCredentials(vaultPath, args, password);
+      // Credentials verified — now run wizard
+      if (process.stdin.isTTY && !jsonMode) {
+        await runInitWizard(vaultPath, creds.password, creds);
+      } else {
+        console.log("Vault already initialized. Use interactive mode (TTY) to reconfigure security factors.");
+      }
+    }
     return;
   }
 
@@ -421,6 +593,34 @@ async function main(): Promise<void> {
       }),
       jsonMode,
     );
+    return;
+  }
+
+  if (scope === "os-secrets" && action === "set") {
+    const name = required(getString(args, "name"), "--name");
+    const value = getString(args, "value") ?? await readPasswordMasked(`Value for "${name}": `);
+    const stored = await setOsSecret(name, value);
+    if (!stored) {
+      throw new Error("OS secret store is unavailable on this system (try AUTHO_DISABLE_OS_SECRETS=1 to confirm, or check that a secret service daemon is running on Linux)");
+    }
+    output({ name, stored: true }, jsonMode);
+    return;
+  }
+
+  if (scope === "os-secrets" && action === "get") {
+    const name = required(getString(args, "name"), "--name");
+    const value = await getOsSecret(name);
+    if (value === null) {
+      throw new Error(`Secret "${name}" not found in OS secret store`);
+    }
+    output({ name, value }, jsonMode);
+    return;
+  }
+
+  if (scope === "os-secrets" && action === "delete") {
+    const name = required(getString(args, "name"), "--name");
+    const deleted = await deleteOsSecret(name);
+    output({ deleted, name }, jsonMode);
     return;
   }
 
@@ -498,7 +698,45 @@ async function main(): Promise<void> {
     process.exit(result.exitCode);
   }
 
-  const session = VaultService.unlock(vaultPath, required(password, "--password"));
+  if (scope === "recovery" && action === "generate") {
+    const outputPath = absolutePath(required(getString(args, "output"), "--output"));
+    const creds = await resolveUnlockCredentials(vaultPath, args, password);
+    const { fileContent } = VaultService.generateRecovery(vaultPath, creds);
+    writeFileSync(outputPath, fileContent, { encoding: "utf8", mode: 0o600 });
+    if (!jsonMode) {
+      console.log(`Recovery file written to ${outputPath}`);
+      console.log("WARNING: Anyone with this file can open your vault. Store it offline.");
+    } else {
+      output({ outputPath, written: true }, jsonMode);
+    }
+    return;
+  }
+
+  if (scope === "recovery" && action === "revoke") {
+    const creds = await resolveUnlockCredentials(vaultPath, args, password);
+    VaultService.revokeRecovery(vaultPath, creds);
+    output({ revoked: true }, jsonMode);
+    return;
+  }
+
+  if (scope === "unlock" && getString(args, "recovery-file")) {
+    const recoveryFilePath = absolutePath(getString(args, "recovery-file") as string);
+    const content = readFileSync(recoveryFilePath, "utf8");
+    // Extract token: find the line after "RECOVERY TOKEN:" and parse hex
+    const lines = content.split("\n");
+    const tokenLineIdx = lines.findIndex((l) => l.trim() === "RECOVERY TOKEN:");
+    if (tokenLineIdx === -1) throw new Error("Invalid recovery file format");
+    const tokenLine = lines[tokenLineIdx + 1]?.trim() ?? "";
+    // Token is formatted as hex uppercase with dashes e.g. "ABCD1234-EFGH5678-..."
+    const token = tokenLine.replace(/-/g, "").toLowerCase();
+    const recoverySession = VaultService.unlock(vaultPath, { password: "", recovery: token });
+    output({ unlocked: true, vaultPath }, jsonMode);
+    recoverySession.close();
+    return;
+  }
+
+  const creds = await resolveUnlockCredentials(vaultPath, args, password);
+  const session = VaultService.unlock(vaultPath, creds);
 
   try {
     if (scope === "import" && action === "legacy") {
