@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -9,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, test } from "bun:test";
+import { deletePin, storePinHash } from "../../packages/core/src/os-secrets.ts";
+import { VaultService } from "../../packages/core/src/index.ts";
 
 const repoRoot = join(import.meta.dir, "..", "..");
 const testAuthoHome = mkdtempSync(join(tmpdir(), "autho-home-"));
@@ -20,6 +23,7 @@ function runCli(args: string[], env?: Record<string, string>) {
     env: {
       ...process.env,
       AUTHO_HOME: testAuthoHome,
+      AUTHO_DISABLE_OS_SECRETS: "1",
       ...(env ?? {}),
     },
     stderr: "pipe",
@@ -40,6 +44,7 @@ async function runCliInteractive(args: string[], input: string, env?: Record<str
     env: {
       ...process.env,
       AUTHO_HOME: testAuthoHome,
+      AUTHO_DISABLE_OS_SECRETS: "1",
       ...(env ?? {}),
     },
     stdin: "pipe",
@@ -78,6 +83,69 @@ async function waitFor(check: () => boolean | Promise<boolean>, timeoutMs = 5000
 
 function cookieHeader(setCookie: string | null): string {
   return (setCookie ?? "").split(";")[0] ?? "";
+}
+
+// Runs CLI without disabling OS secrets (needed for PIN tests)
+function runCliOsSecrets(args: string[], env?: Record<string, string>) {
+  const result = Bun.spawnSync({
+    cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      AUTHO_HOME: testAuthoHome,
+      ...(env ?? {}),
+    },
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+
+  return {
+    exitCode: result.exitCode,
+    stderr: result.stderr.toString("utf8"),
+    stdout: result.stdout.toString("utf8"),
+  };
+}
+
+function runCliOsSecretsJson(args: string[], env?: Record<string, string>) {
+  const result = runCliOsSecrets([...args, "--json"], env);
+  expect(result.exitCode).toBe(0);
+  return JSON.parse(result.stdout) as unknown;
+}
+
+// Minimal RFC 6238 TOTP code generator for tests (mirrors crypto/src/index.ts)
+function computeTotp(base32Secret: string): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let value = 0;
+  const keyBytes: number[] = [];
+  for (const char of base32Secret.toUpperCase()) {
+    const idx = alphabet.indexOf(char);
+    if (idx === -1) continue;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      keyBytes.push((value >> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+
+  const key = Buffer.from(keyBytes);
+  const counter = Math.floor(Date.now() / 30_000);
+  const message = Buffer.alloc(8);
+  let cursor = counter;
+  for (let index = 7; index >= 0; index -= 1) {
+    message[index] = cursor & 0xff;
+    cursor >>= 8;
+  }
+
+  const hash = createHmac("sha1", key).update(message).digest();
+  const offset = hash[hash.length - 1] & 0x0f;
+  const binary =
+    ((hash[offset] & 0x7f) << 24) |
+    ((hash[offset + 1] & 0xff) << 16) |
+    ((hash[offset + 2] & 0xff) << 8) |
+    (hash[offset + 3] & 0xff);
+  return String(binary % 1_000_000).padStart(6, "0");
 }
 
 describe("autho rewrite CLI", () => {
@@ -710,6 +778,252 @@ describe("autho rewrite CLI", () => {
   });
 });
 
+describe("autho security features (PIN, TOTP, recovery file)", () => {
+  test("TOTP vault unlock: enable, verify, wrong code fails, remove", { timeout: 15000 }, () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-totp-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const password = "correct horse battery staple";
 
+    // Init vault (no TTY → wizard is skipped)
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
 
+    // Add a secret so we can verify unlock works
+    runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "s1", "--type", "note", "--value", "hello"]);
 
+    // Enable TOTP programmatically (wizard is TTY-only)
+    const { secret } = VaultService.setupTotp(vaultPath);
+    VaultService.enableTotp(vaultPath, { password }, secret, computeTotp(secret));
+
+    // Unlock with valid TOTP code → succeeds
+    const listed = runCliJson([
+      "secrets", "list",
+      "--vault", vaultPath,
+      "--password", password,
+      "--totp", computeTotp(secret),
+    ]) as Array<{ name: string }>;
+    expect(listed.some((s) => s.name === "s1")).toBe(true);
+
+    // Unlock with wrong TOTP code → fails
+    const bad = runCli(["secrets", "list", "--vault", vaultPath, "--password", password, "--totp", "000000"]);
+    expect(bad.exitCode).toBe(1);
+    expect(bad.stderr).toContain("Invalid or missing TOTP code");
+
+    // Unlock without providing TOTP → fails
+    const missing = runCli(["secrets", "list", "--vault", vaultPath, "--password", password]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain("TOTP is enabled");
+
+    // Remove TOTP
+    VaultService.removeTotp(vaultPath, { password, totp: computeTotp(secret) });
+
+    // After removal: unlock without TOTP → succeeds
+    const afterRemove = runCliJson([
+      "secrets", "list",
+      "--vault", vaultPath,
+      "--password", password,
+    ]) as Array<{ name: string }>;
+    expect(afterRemove.some((s) => s.name === "s1")).toBe(true);
+
+    // Audit trail contains TOTP events
+    const audit = runCliJson(["audit", "list", "--vault", vaultPath, "--password", password, "--limit", "20"]) as Array<{ eventType: string }>;
+    const types = audit.map((e) => e.eventType);
+    expect(types).toContain("auth.totp.enabled");
+    expect(types).toContain("auth.totp.removed");
+  });
+
+  test("recovery file: generate, unlock, revoke, post-revoke unlock fails", { timeout: 20000 }, () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-recovery-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const recoveryFile = join(tempRoot, "vault.recovery");
+    const password = "correct horse battery staple";
+
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
+    runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "secure-note", "--type", "note", "--value", "top-secret"]);
+
+    // Generate recovery file via CLI
+    const genResult = runCli([
+      "recovery", "generate",
+      "--vault", vaultPath,
+      "--password", password,
+      "--output", recoveryFile,
+    ]);
+    expect(genResult.exitCode).toBe(0);
+    expect(existsSync(recoveryFile)).toBe(true);
+
+    // Recovery file has expected format
+    const content = readFileSync(recoveryFile, "utf8");
+    expect(content).toContain("AUTHO VAULT RECOVERY FILE");
+    expect(content).toContain("RECOVERY TOKEN:");
+    expect(content).toContain("autho unlock --recovery-file");
+
+    // Unlock with recovery file → succeeds (bypasses password / TOTP / PIN)
+    const unlockResult = runCliJson([
+      "unlock",
+      "--vault", vaultPath,
+      "--recovery-file", recoveryFile,
+    ]) as { unlocked: boolean };
+    expect(unlockResult.unlocked).toBe(true);
+
+    // Revoke recovery
+    const revokeResult = runCli([
+      "recovery", "revoke",
+      "--vault", vaultPath,
+      "--password", password,
+      "--json",
+    ]);
+    expect(revokeResult.exitCode).toBe(0);
+    expect(JSON.parse(revokeResult.stdout)).toMatchObject({ revoked: true });
+
+    // Unlock after revoke → fails
+    const badUnlock = runCli([
+      "unlock",
+      "--vault", vaultPath,
+      "--recovery-file", recoveryFile,
+    ]);
+    expect(badUnlock.exitCode).toBe(1);
+
+    // Audit trail
+    const audit = runCliJson(["audit", "list", "--vault", vaultPath, "--password", password, "--limit", "20"]) as Array<{ eventType: string }>;
+    const types = audit.map((e) => e.eventType);
+    expect(types).toContain("auth.recovery.generated");
+    expect(types).toContain("auth.recovery.revoked");
+  });
+
+  test("recovery file: unlock bypasses TOTP when recovery file is present", { timeout: 15000 }, () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-recovery-totp-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const recoveryFile = join(tempRoot, "vault.recovery");
+    const password = "correct horse battery staple";
+
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
+
+    // Enable TOTP
+    const { secret } = VaultService.setupTotp(vaultPath);
+    VaultService.enableTotp(vaultPath, { password }, secret, computeTotp(secret));
+
+    // Generate recovery file (requires TOTP now that it's enabled)
+    const genResult = runCli([
+      "recovery", "generate",
+      "--vault", vaultPath,
+      "--password", password,
+      "--totp", computeTotp(secret),
+      "--output", recoveryFile,
+    ]);
+    expect(genResult.exitCode).toBe(0);
+
+    // Unlock with recovery file — no TOTP needed
+    const unlockResult = runCliJson([
+      "unlock",
+      "--vault", vaultPath,
+      "--recovery-file", recoveryFile,
+    ]) as { unlocked: boolean };
+    expect(unlockResult.unlocked).toBe(true);
+  });
+
+  test("PIN vault protection: set, verify, wrong PIN fails, remove", { timeout: 15000 }, async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-pin-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const password = "correct horse battery staple";
+    const pin = "4567";
+
+    // Init vault (OS secrets enabled — no AUTHO_DISABLE_OS_SECRETS override)
+    expect(runCliOsSecrets(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
+
+    // Store PIN directly (wizard is TTY-only)
+    const stored = await storePinHash(vaultPath, pin);
+    if (!stored) {
+      // OS secret store unavailable in this environment — skip PIN assertions
+      console.log("Skipping PIN test: OS secret store unavailable");
+      return;
+    }
+
+    // Unlock with correct PIN via CLI
+    const listed = runCliOsSecretsJson([
+      "secrets", "list",
+      "--vault", vaultPath,
+      "--password", password,
+      "--pin", pin,
+    ]) as Array<unknown>;
+    expect(Array.isArray(listed)).toBe(true);
+
+    // Unlock with wrong PIN → fails
+    const bad = runCliOsSecrets([
+      "secrets", "list",
+      "--vault", vaultPath,
+      "--password", password,
+      "--pin", "0000",
+    ]);
+    expect(bad.exitCode).toBe(1);
+    expect(bad.stderr).toContain("Wrong PIN");
+
+    // Unlock without --pin while PIN is set → fails
+    const missing = runCliOsSecrets([
+      "secrets", "list",
+      "--vault", vaultPath,
+      "--password", password,
+    ]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain("PIN is set");
+
+    // Remove PIN
+    const deleted = await deletePin(vaultPath);
+    expect(deleted).toBe(true);
+
+    // After removal: unlock without PIN → succeeds
+    const afterDelete = runCliOsSecretsJson([
+      "secrets", "list",
+      "--vault", vaultPath,
+      "--password", password,
+    ]) as Array<unknown>;
+    expect(Array.isArray(afterDelete)).toBe(true);
+  });
+
+  test("TOTP + recovery together: all factors can coexist", { timeout: 20000 }, () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-full-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const recoveryFile = join(tempRoot, "vault.recovery");
+    const password = "correct horse battery staple";
+
+    expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
+    runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "test-secret", "--type", "note", "--value", "value"]);
+
+    // Enable TOTP
+    const { secret } = VaultService.setupTotp(vaultPath);
+    VaultService.enableTotp(vaultPath, { password }, secret, computeTotp(secret));
+
+    // Generate recovery file (must pass TOTP since it's enabled)
+    expect(runCli([
+      "recovery", "generate",
+      "--vault", vaultPath,
+      "--password", password,
+      "--totp", computeTotp(secret),
+      "--output", recoveryFile,
+    ]).exitCode).toBe(0);
+
+    // Normal unlock (password + TOTP) works
+    const withTotp = runCliJson([
+      "secrets", "list",
+      "--vault", vaultPath,
+      "--password", password,
+      "--totp", computeTotp(secret),
+    ]) as Array<{ name: string }>;
+    expect(withTotp.some((s) => s.name === "test-secret")).toBe(true);
+
+    // Recovery file bypass (no password, no TOTP) works
+    const withRecovery = runCliJson([
+      "unlock",
+      "--vault", vaultPath,
+      "--recovery-file", recoveryFile,
+    ]) as { unlocked: boolean };
+    expect(withRecovery.unlocked).toBe(true);
+
+    // Wrong password but correct TOTP → fails
+    const badPw = runCli([
+      "secrets", "list",
+      "--vault", vaultPath,
+      "--password", "wrong-password",
+      "--totp", computeTotp(secret),
+    ]);
+    expect(badPw.exitCode).toBe(1);
+  });
+});

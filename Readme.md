@@ -22,6 +22,7 @@ bun install -g autho
 - Short-lived secret leases with audit and revoke
 - Local daemon unlock flow for repeated agent tasks
 - Local-only Bun web UI for unlock and secret browsing
+- Native OS secret store integration (macOS Keychain, Linux Secret Service, Windows Credential Manager)
 
 ## Security Model
 
@@ -34,6 +35,7 @@ bun install -g autho
 - Folder decryption validates paths against **directory traversal**
 - SQLite vault files are hardened to `0600` permissions
 - Local daemon auth tokens use OS secret storage when available (falls back to file)
+- Master password stored in OS secret store after `init` — no repeated prompts
 - Audit events record access patterns without storing secret values
 - Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
 
@@ -42,6 +44,7 @@ Current at-rest boundary for this release:
 - Secret payloads, wrapped keys, and encrypted artifacts are encrypted at rest
 - SQLite metadata such as names, types, timestamps, leases, and audit rows is not fully encrypted at rest
 - If the OS secret store is unavailable, the daemon token falls back to the local state file
+- Set `AUTHO_DISABLE_OS_SECRETS=1` to opt out of all OS secret store usage
 
 ## Requirements
 
@@ -55,6 +58,10 @@ bun install
 bun run hooks:install
 bun run autho -- init --password "correct horse battery staple"
 ```
+
+On init the master password is automatically saved to the native OS secret store (macOS Keychain, Linux Secret Service, Windows Credential Manager). After that, all commands — CLI, TUI, and agents — unlock silently without prompting.
+
+To opt out: `AUTHO_DISABLE_OS_SECRETS=1`
 
 By default, Autho stores runtime state in `~/.autho`. For tests, CI, or isolated environments you can override that with `AUTHO_HOME`.
 
@@ -183,10 +190,24 @@ bun test
 Autho is designed for coding agents that need secrets at runtime:
 
 ```bash
-export AUTHO_MASTER_PASSWORD="..."
+# After init, the master password is in the OS secret store — no env var needed
 autho lease create --secret github --secret openai --ttl 300 --json
 autho exec --lease <id> --map GITHUB_TOKEN=github --map OPENAI_KEY=openai -- node build.js
 autho lease revoke --lease <id>
+```
+
+If the OS secret store is unavailable (headless CI, Docker), fall back to the env var:
+
+```bash
+export AUTHO_MASTER_PASSWORD="..."
+```
+
+Store arbitrary named secrets in the OS secret store directly:
+
+```bash
+autho os-secrets set --name my-token --value ghp_xxx
+autho os-secrets get --name my-token
+autho os-secrets delete --name my-token
 ```
 
 ## Current Scope

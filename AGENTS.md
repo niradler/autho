@@ -165,3 +165,5 @@ Depending on the task, future work should usually update one or more of:
 - Use ORC CLI for task and knowledge tracking when it is installed in the environment; do not block work on ORC availability.
 - The current repo may be dirty. Do not revert unrelated user changes.
 - This project should stay easy for both humans and coding agents to operate safely.
+- when we clone on other machine the codex-tmp is nto avilable
+- update readme.md file when needed to align witht he project, keep it clean and sturctured.
