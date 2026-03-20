@@ -726,9 +726,9 @@ async function main(): Promise<void> {
     const lines = content.split("\n");
     const tokenLineIdx = lines.findIndex((l) => l.trim() === "RECOVERY TOKEN:");
     if (tokenLineIdx === -1) throw new Error("Invalid recovery file format");
-    const tokenLine = lines[tokenLineIdx + 1]?.trim() ?? "";
-    // Token is formatted as hex uppercase with dashes e.g. "ABCD1234-EFGH5678-..."
-    const token = tokenLine.replace(/-/g, "").toLowerCase();
+    const rawTokenLine = lines.slice(tokenLineIdx + 1).find((l) => l.trim() !== "") ?? "";
+    const token = rawTokenLine.replace(/-/g, "").toLowerCase();
+    if (!token) throw new Error("Invalid recovery file format: missing token");
     const recoverySession = VaultService.unlock(vaultPath, { password: "", recovery: token });
     output({ unlocked: true, vaultPath }, jsonMode);
     recoverySession.close();
