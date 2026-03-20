@@ -23,9 +23,6 @@ jobs:
           - os: macos-latest
             target: bun-darwin-arm64
             artifact: autho-darwin-arm64
-          - os: macos-13
-            target: bun-darwin-x64
-            artifact: autho-darwin-x64
           - os: windows-latest
             target: bun-windows-x64
             artifact: autho-windows-x64.exe
