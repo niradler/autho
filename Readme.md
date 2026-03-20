@@ -191,4 +191,4 @@ autho lease revoke --lease <id>
 
 ## Current Scope
 
-This release is intended to be stable for local-first Bun usage and parity with the legacy vault workflows. Planned future work such as proxy mode, richer agent policy management, and a fuller dashboard remains tracked in [`.codex-tmp/plan.md`](./.codex-tmp/plan.md) and is not part of this release cut.
+This release is intended to be stable for local-first Bun usage and parity with the legacy vault workflows. Planned future work includes proxy mode, richer agent policy management, and a fuller dashboard.
