@@ -95,7 +95,7 @@ function useToast() {
 
 function tryUnlockWithPassword(vaultPath: string, password: string): VaultSession | null {
   try {
-    return VaultService.unlock(vaultPath, password);
+    return VaultService.unlock(vaultPath, { password });
   } catch {
     return null;
   }
