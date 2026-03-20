@@ -270,7 +270,25 @@ PIN events are intentionally **not** in the audit log — PIN is local-only and 
 
 ---
 
-## 6. Opt Out
+## 6. CI / Agent Env Vars
+
+All three factors have env var support for headless automation:
+
+```bash
+# Resolution order for each factor:
+# Password:  AUTHO_MASTER_PASSWORD > OS keychain > --password > interactive prompt
+# PIN:       AUTHO_PIN > --pin > interactive prompt
+# TOTP:      AUTHO_TOTP_CODE > --totp > interactive prompt
+
+AUTHO_MASTER_PASSWORD="correct horse battery staple" \
+  AUTHO_PIN="1234" \
+  AUTHO_TOTP_CODE="$(your-totp-generator)" \
+  bun run autho -- secrets list --vault /path/to/vault.db
+```
+
+---
+
+## 7. Opt Out
 
 ```bash
 # Disable OS secret store (no keychain, no PIN)

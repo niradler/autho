@@ -289,9 +289,16 @@ function UnlockScreen({ onUnlock, vaultPath }: {
             if (token) {
               const session = tryUnlockWithRecovery(vaultPath, token);
               if (!cancelled && session) { onUnlock(session); return; }
+              if (!cancelled) setError("Recovery file failed — enter password instead");
+            } else {
+              if (!cancelled) setError("Recovery file is malformed — enter password instead");
             }
+          } else {
+            if (!cancelled) setError("Recovery file is malformed — enter password instead");
           }
-        } catch { /* ignore */ }
+        } catch {
+          if (!cancelled) setError("Recovery file could not be read — enter password instead");
+        }
       }
 
       // Check which steps are needed

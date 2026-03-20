@@ -212,11 +212,13 @@ export function verifyTotpCode(
   opts?: { algorithm?: string; digits?: number },
 ): boolean {
   const digits = opts?.digits ?? 6;
-  const normalized = code.padStart(digits, "0");
+  if (code.length !== digits) {
+    return false;
+  }
   const now = Date.now();
 
   for (const offset of [-30_000, 0, 30_000]) {
-    if (generateTotpCode(secret, opts, now + offset) === normalized) {
+    if (generateTotpCode(secret, opts, now + offset) === code) {
       return true;
     }
   }

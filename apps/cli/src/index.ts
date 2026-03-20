@@ -291,22 +291,22 @@ async function resolveUnlockCredentials(
   const creds: UnlockCredentials = { password: required(password, "--password") };
 
   // PIN check (if set on this machine)
+  // Resolution order: AUTHO_PIN env var > --pin flag > interactive prompt
   if (await hasPinSet(vaultPath)) {
-    const pin = process.stdin.isTTY
-      ? await readPasswordMasked("PIN: ")
-      : getString(args, "pin");
-    if (!pin) throw new Error("PIN is set on this vault — provide it interactively or with --pin");
+    const pin = process.env.AUTHO_PIN
+      ?? (process.stdin.isTTY ? await readPasswordMasked("PIN: ") : getString(args, "pin"));
+    if (!pin) throw new Error("PIN is set on this vault — provide it with AUTHO_PIN, --pin, or interactively");
     const ok = await verifyPin(vaultPath, pin);
     if (!ok) throw new Error("Wrong PIN");
   }
 
   // TOTP check (if enabled in vault)
+  // Resolution order: AUTHO_TOTP_CODE env var > --totp flag > interactive prompt
   const authConfig = VaultService.getAuthConfig(vaultPath);
   if (authConfig?.totp) {
-    const totp = process.stdin.isTTY
-      ? await readPasswordMasked("Authenticator code: ")
-      : getString(args, "totp");
-    if (!totp) throw new Error("TOTP is enabled — provide a 6-digit code interactively or with --totp");
+    const totp = process.env.AUTHO_TOTP_CODE
+      ?? (process.stdin.isTTY ? await readPasswordMasked("Authenticator code: ") : getString(args, "totp"));
+    if (!totp) throw new Error("TOTP is enabled — provide a 6-digit code with AUTHO_TOTP_CODE, --totp, or interactively");
     creds.totp = totp;
   }
 
@@ -475,7 +475,9 @@ function help(): string {
     "",
     "  For automation and coding agents, use one of:",
     "    autho init (or rerun)             Stores master password in the native OS secret store automatically",
-    "    AUTHO_MASTER_PASSWORD=<value>    Environment variable",
+    "    AUTHO_MASTER_PASSWORD=<value>    Environment variable (master password)",
+    "    AUTHO_PIN=<value>                Environment variable (PIN, if set on this machine)",
+    "    AUTHO_TOTP_CODE=<value>          Environment variable (TOTP code, if enabled)",
     "    --password <value>               CLI flag (visible in shell history - avoid!)",
     "",
     "  Native OS secret store support (via Bun.secrets):",

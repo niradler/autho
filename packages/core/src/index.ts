@@ -446,6 +446,15 @@ export class VaultService {
       try {
         const recoveryKEK = deriveKeyFromPassword(creds.recovery, vaultAuth.recovery.kdf);
         const rootKey = decryptWithKey(vaultAuth.recovery.wrappedRootKey, recoveryKEK, "autho:vault-recovery");
+        db.insertAudit({
+          createdAt: new Date().toISOString(),
+          eventType: "auth.unlock.recovery",
+          id: randomId(),
+          message: "Vault unlocked via recovery file",
+          metadata: JSON.stringify({}),
+          subjectRef: null,
+          subjectType: "vault",
+        });
         return new VaultSession(db, rootKey);
       } catch (error) {
         db.close();
@@ -557,7 +566,7 @@ export class VaultService {
     }
   }
 
-  static generateRecovery(vaultPath: string, credentials: UnlockCredentials): { token: string; fileContent: string } {
+  static generateRecovery(vaultPath: string, credentials: UnlockCredentials): { fileContent: string } {
     const session = VaultService.unlock(vaultPath, credentials);
     const rootKey = session.getRootKey();
     session.close();
@@ -619,7 +628,7 @@ export class VaultService {
         subjectType: "vault",
       });
 
-      return { token, fileContent };
+      return { fileContent };
     } finally {
       db.close();
     }
@@ -658,7 +667,7 @@ export class VaultSession {
   ) {}
 
   getRootKey(): Buffer {
-    return this.rootKey;
+    return Buffer.from(this.rootKey);
   }
 
   close(): void {
