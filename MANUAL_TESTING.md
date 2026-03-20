@@ -44,25 +44,28 @@ At the wizard prompt:
 
 ### Verify PIN protects the vault
 
+PIN can be provided three ways (checked in this order): `AUTHO_PIN` env var → `--pin` flag → interactive prompt.
+
 ```bash
-# Correct PIN → succeeds
+# Via interactive prompt (TTY)
 bun run autho -- secrets list --password "correct horse battery staple"
 # ↳ Should prompt: "PIN: ****" — enter 1234 → list appears
 
-# Wrong PIN → fails
-# Enter any wrong PIN when prompted → should print "Wrong PIN" and exit 1
-```
-
-Non-interactive (e.g. agent/CI mode):
-
-```bash
-# Correct PIN via flag
+# Via --pin flag
 bun run autho -- secrets list --password "correct horse battery staple" --pin 1234
-# ↳ Should list secrets
+# ↳ Should list secrets without prompting
 
-# Wrong PIN via flag
+# Via env var
+AUTHO_PIN=1234 bun run autho -- secrets list --password "correct horse battery staple"
+# ↳ Should list secrets without prompting
+
+# Wrong PIN → fails
 bun run autho -- secrets list --password "correct horse battery staple" --pin 0000
 # ↳ Should exit 1 with: Wrong PIN
+
+# Missing PIN (non-TTY, no flag, no env var) → fails
+echo "" | bun run autho -- secrets list --password "correct horse battery staple"
+# ↳ Should exit 1 with: PIN is set on this vault
 ```
 
 ### Remove PIN
