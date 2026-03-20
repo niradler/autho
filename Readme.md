@@ -36,6 +36,7 @@ bun install -g autho
 - SQLite vault files are hardened to `0600` permissions
 - Local daemon auth tokens use OS secret storage when available (falls back to file)
 - Master password stored in OS secret store after `init` — no repeated prompts
+- PIN is a local machine gate stored in the OS keychain — it does not travel with the vault file and provides no cryptographic protection of vault data
 - Audit events record access patterns without storing secret values
 - Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
 

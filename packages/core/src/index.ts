@@ -464,9 +464,9 @@ export class VaultService {
 
     // Password path
     try {
-      // Derive password KEK for TOTP check
+      // Derive password KEK once — reused for both TOTP decryption and root key unwrapping
+      const passwordKEK = deriveKeyFromPassword(creds.password, config.kdf);
       if (vaultAuth?.totp) {
-        const passwordKEK = deriveKeyFromPassword(creds.password, config.kdf);
         const totpSecret = decryptWithKey(
           vaultAuth.totp.encryptedSecret,
           passwordKEK,
@@ -476,7 +476,7 @@ export class VaultService {
           throw new Error("Invalid or missing TOTP code");
         }
       }
-      const rootKey = unlockRootKey(creds.password, config);
+      const rootKey = decryptWithKey(config.wrappedRootKey, passwordKEK, "autho:vault-root");
       return new VaultSession(db, rootKey);
     } catch (error) {
       db.close();

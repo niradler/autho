@@ -294,7 +294,8 @@ async function resolveUnlockCredentials(
   // Resolution order: AUTHO_PIN env var > --pin flag > interactive prompt
   if (await hasPinSet(vaultPath)) {
     const pin = process.env.AUTHO_PIN
-      ?? (process.stdin.isTTY ? await readPasswordMasked("PIN: ") : getString(args, "pin"));
+      ?? getString(args, "pin")
+      ?? (process.stdin.isTTY ? await readPasswordMasked("PIN: ") : undefined);
     if (!pin) throw new Error("PIN is set on this vault — provide it with AUTHO_PIN, --pin, or interactively");
     const ok = await verifyPin(vaultPath, pin);
     if (!ok) throw new Error("Wrong PIN");
@@ -305,7 +306,8 @@ async function resolveUnlockCredentials(
   const authConfig = VaultService.getAuthConfig(vaultPath);
   if (authConfig?.totp) {
     const totp = process.env.AUTHO_TOTP_CODE
-      ?? (process.stdin.isTTY ? await readPasswordMasked("Authenticator code: ") : getString(args, "totp"));
+      ?? getString(args, "totp")
+      ?? (process.stdin.isTTY ? await readPasswordMasked("Authenticator code: ") : undefined);
     if (!totp) throw new Error("TOTP is enabled — provide a 6-digit code with AUTHO_TOTP_CODE, --totp, or interactively");
     creds.totp = totp;
   }

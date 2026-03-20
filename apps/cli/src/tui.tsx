@@ -111,10 +111,9 @@ function tryUnlockWithRecovery(vaultPath: string, token: string): VaultSession |
 
 // ─── Password Method ─────────────────────────────────────────────────
 
-function PasswordMethod({ onSubmit, onError, vaultPath: _vaultPath }: {
+function PasswordMethod({ onSubmit, vaultPath: _vaultPath }: {
   onSubmit: (password: string) => void;
-  onError: (error: string) => void;
-  vaultPath?: string; // kept for compat, unused here
+  vaultPath?: string;
 }) {
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -138,8 +137,6 @@ function PasswordMethod({ onSubmit, onError, vaultPath: _vaultPath }: {
     const char = key.sequence;
     if (char && char.length === 1 && char.charCodeAt(0) >= 32) setPassword((p) => p + char);
   });
-
-  void onError; // available for parent to use
 
   return (
     <box flexDirection="row" gap={1} marginTop={1}>
@@ -385,7 +382,7 @@ function UnlockScreen({ onUnlock, vaultPath }: {
         <text fg="#888888">Unlock your vault</text>
         {error ? <box backgroundColor="#331111" paddingX={1} width="100%"><text fg="#FF4444">{error}</text></box> : null}
         {step === "password" && (
-          <PasswordMethod vaultPath={vaultPath} onSubmit={handlePasswordSubmit} onError={setError} />
+          <PasswordMethod vaultPath={vaultPath} onSubmit={handlePasswordSubmit} />
         )}
         {step === "pin" && (
           <PinMethod vaultPath={vaultPath} password={password} onVerified={handlePinVerified} onError={setError} />
