@@ -23,6 +23,10 @@ jobs:
           - os: macos-latest
             target: bun-darwin-arm64
             artifact: autho-darwin-arm64
+          - os: macos-latest
+            target: bun-darwin-x64
+            artifact: autho-darwin-x64
+            cross_pkg: "@opentui/core-darwin-x64"
           - os: windows-latest
             target: bun-windows-x64
             artifact: autho-windows-x64.exe
@@ -37,6 +41,13 @@ jobs:
           bun-version: latest
 
       - run: bun install
+
+      - name: Install cross-platform native binding
+        if: matrix.cross_pkg
+        run: |
+          npm pack ${{ matrix.cross_pkg }}@0.1.87 --pack-destination /tmp
+          tar -xzf /tmp/*.tgz -C /tmp
+          cp -r /tmp/package node_modules/${{ matrix.cross_pkg }}
 
       - name: Build binary
         run: bun build ./apps/cli/src/index.ts --compile --minify --target=${{ matrix.target }} --outfile=dist/${{ matrix.artifact }}
