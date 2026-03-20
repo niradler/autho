@@ -2,7 +2,22 @@ import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import type { VaultConfig } from "../../crypto/src/index.ts";
+import type { EncryptedBlob, VaultConfig, VaultKdfConfig } from "../../crypto/src/index.ts";
+
+export type VaultAuth = {
+  version: 1;
+  totp?: {
+    encryptedSecret: EncryptedBlob;
+    algorithm: "SHA1" | "SHA256" | "SHA512";
+    digits: 6 | 8;
+    period: 30;
+  };
+  recovery?: {
+    wrappedRootKey: EncryptedBlob;
+    kdf: VaultKdfConfig;
+    createdAt: string;
+  };
+};
 
 export type SecretRow = {
   createdAt: string;
@@ -132,6 +147,19 @@ export class AuthoDatabase {
     this.db
       .query("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")
       .run("vault.config", JSON.stringify(config));
+  }
+
+  getVaultAuth(): VaultAuth | null {
+    const row = this.db
+      .query("SELECT value FROM meta WHERE key = ?1")
+      .get("vault.auth") as { value: string } | null;
+    return row ? parseJson<VaultAuth>(row.value) : null;
+  }
+
+  setVaultAuth(auth: VaultAuth): void {
+    this.db
+      .query("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")
+      .run("vault.auth", JSON.stringify(auth));
   }
 
   countSecrets(): number {
