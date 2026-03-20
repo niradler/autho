@@ -23,6 +23,7 @@
     "build:web:compile": "bun build ./apps/web/src/index.ts --outfile ./dist/autho-web --target bun --compile",
     "build": "bun run build:cli && bun run build:daemon && bun run build:web",
     "build:compile": "bun run build:cli:compile && bun run build:daemon:compile && bun run build:web:compile",
+    "build:release": "bun run ./scripts/build-release.ts",
     "test": "bun test",
     "test:v2": "bun test",
     "format": "bun run ./scripts/quality.ts format:check",
