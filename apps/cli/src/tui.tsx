@@ -6,11 +6,12 @@ import {
   VaultService,
   defaultVaultPath,
 } from "../../../packages/core/src/index.ts";
-import type { VaultSession } from "../../../packages/core/src/index.ts";
+import type { UnlockCredentials, VaultSession } from "../../../packages/core/src/index.ts";
+import { hasPinSet, loadVaultPassword, verifyPin } from "../../../packages/core/src/os-secrets.ts";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
-type Screen = "password" | "home" | "detail" | "create" | "edit";
+type Screen = "unlock" | "home" | "detail" | "create" | "edit";
 type SecretType = "password" | "note" | "otp";
 
 interface SecretRecord {
@@ -90,31 +91,41 @@ function useToast() {
   return { toast, show };
 }
 
-// ─── Password Screen ─────────────────────────────────────────────────
+// ─── Unlock System ───────────────────────────────────────────────────
 
-function PasswordScreen({ onUnlock, vaultPath }: {
-  onUnlock: (session: VaultSession) => void; vaultPath: string;
+function tryUnlockWithPassword(vaultPath: string, password: string): VaultSession | null {
+  try {
+    return VaultService.unlock(vaultPath, { password });
+  } catch {
+    return null;
+  }
+}
+
+function tryUnlockWithRecovery(vaultPath: string, token: string): VaultSession | null {
+  try {
+    return VaultService.unlock(vaultPath, { password: "", recovery: token });
+  } catch {
+    return null;
+  }
+}
+
+// ─── Password Method ─────────────────────────────────────────────────
+
+function PasswordMethod({ onSubmit, vaultPath: _vaultPath }: {
+  onSubmit: (password: string) => void;
+  vaultPath?: string;
 }) {
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [unlocking, setUnlocking] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   useKeyboard((key) => {
     if (key.eventType !== "press" && key.eventType !== "repeat") return;
-    if (unlocking) return;
+    if (submitting) return;
 
     if (key.name === "enter" || key.name === "return") {
       if (!password) return;
-      setUnlocking(true);
-      setError("");
-      try {
-        const session = VaultService.unlock(vaultPath, password);
-        onUnlock(session);
-      } catch {
-        setError("Wrong password");
-        setPassword("");
-        setUnlocking(false);
-      }
+      setSubmitting(true);
+      onSubmit(password);
       return;
     }
     if (key.name === "backspace") { setPassword((p) => p.slice(0, -1)); return; }
@@ -123,10 +134,246 @@ function PasswordScreen({ onUnlock, vaultPath }: {
         key.name === "home" || key.name === "end" || key.name === "delete" || key.name === "insert" ||
         key.name === "pageup" || key.name === "pagedown" ||
         (key.name.startsWith("f") && /^f\d+$/.test(key.name))) return;
-
     const char = key.sequence;
     if (char && char.length === 1 && char.charCodeAt(0) >= 32) setPassword((p) => p + char);
   });
+
+  return (
+    <box flexDirection="row" gap={1} marginTop={1}>
+      <text fg="#AAAAAA">Password </text>
+      <box backgroundColor="#111111" flexGrow={1} paddingX={1} height={1}>
+        <text fg="#FFD700">{password ? "*".repeat(password.length) : ""}</text>
+      </box>
+      {submitting ? <text fg="#FFD700"> ...</text> : null}
+    </box>
+  );
+}
+
+// ─── PIN Method ───────────────────────────────────────────────────────
+
+function PinMethod({ vaultPath, password, onVerified, onError }: {
+  vaultPath: string;
+  password: string;
+  onVerified: (password: string) => void;
+  onError: (error: string) => void;
+}) {
+  const [pin, setPin] = useState("");
+  const [verifying, setVerifying] = useState(false);
+
+  useKeyboard((key) => {
+    if (key.eventType !== "press" && key.eventType !== "repeat") return;
+    if (verifying) return;
+
+    if (key.name === "enter" || key.name === "return") {
+      if (!pin) return;
+      setVerifying(true);
+      verifyPin(vaultPath, pin).then((ok) => {
+        if (ok) {
+          onVerified(password);
+        } else {
+          onError("Wrong PIN");
+          setPin("");
+          setVerifying(false);
+        }
+      });
+      return;
+    }
+    if (key.name === "backspace") { setPin((p) => p.slice(0, -1)); return; }
+    if (key.ctrl || key.meta || key.name === "escape" || key.name === "tab" ||
+        key.name === "up" || key.name === "down" || key.name === "left" || key.name === "right" ||
+        key.name === "home" || key.name === "end" || key.name === "delete" || key.name === "insert" ||
+        key.name === "pageup" || key.name === "pagedown" ||
+        (key.name.startsWith("f") && /^f\d+$/.test(key.name))) return;
+    const char = key.sequence;
+    if (char && char.length === 1 && char.charCodeAt(0) >= 32) setPin((p) => p + char);
+  });
+
+  return (
+    <box flexDirection="row" gap={1} marginTop={1}>
+      <text fg="#AAAAAA">PIN      </text>
+      <box backgroundColor="#111111" flexGrow={1} paddingX={1} height={1}>
+        <text fg="#FFD700">{pin ? "*".repeat(pin.length) : ""}</text>
+      </box>
+      {verifying ? <text fg="#FFD700"> ...</text> : null}
+    </box>
+  );
+}
+
+// ─── TOTP Method ──────────────────────────────────────────────────────
+
+function TotpMethod({ onSubmit, onError: _onError }: {
+  onSubmit: (totp: string) => void;
+  onError: (error: string) => void;
+}) {
+  const [code, setCode] = useState("");
+  const [remaining, setRemaining] = useState(0);
+
+  // Countdown timer
+  useEffect(() => {
+    const update = () => {
+      const secs = Math.ceil((30_000 - (Date.now() % 30_000)) / 1000);
+      setRemaining(secs);
+    };
+    update();
+    const interval = setInterval(update, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useKeyboard((key) => {
+    if (key.eventType !== "press" && key.eventType !== "repeat") return;
+
+    if (key.name === "enter" || key.name === "return") {
+      if (code.length !== 6) return;
+      onSubmit(code);
+      return;
+    }
+    if (key.name === "backspace") { setCode((c) => c.slice(0, -1)); return; }
+    if (key.ctrl || key.meta || key.name === "escape" || key.name === "tab" ||
+        key.name === "up" || key.name === "down" || key.name === "left" || key.name === "right" ||
+        key.name === "home" || key.name === "end" || key.name === "delete" || key.name === "insert" ||
+        key.name === "pageup" || key.name === "pagedown" ||
+        (key.name.startsWith("f") && /^f\d+$/.test(key.name))) return;
+    const char = key.sequence;
+    if (char && /^\d$/.test(char) && code.length < 6) {
+      const next = code + char;
+      setCode(next);
+      if (next.length === 6) {
+        onSubmit(next);
+      }
+    }
+  });
+
+  return (
+    <box flexDirection="column" gap={1} marginTop={1}>
+      <box flexDirection="row" gap={1}>
+        <text fg="#AAAAAA">Auth code </text>
+        <box backgroundColor="#111111" flexGrow={1} paddingX={1} height={1}>
+          <text fg="#FFD700">{code || "_".repeat(6)}</text>
+        </box>
+        <text fg={remaining <= 5 ? "#FF4444" : "#555555"}> {remaining}s</text>
+      </box>
+      <text fg="#555555">Enter 6-digit authenticator code</text>
+    </box>
+  );
+}
+
+// ─── Unlock Screen ───────────────────────────────────────────────────
+
+function UnlockScreen({ onUnlock, vaultPath }: {
+  onUnlock: (session: VaultSession) => void; vaultPath: string;
+}) {
+  const [step, setStep] = useState<"loading" | "password" | "pin" | "totp" | "unlocking">("loading");
+  const [error, setError] = useState("");
+  const [password, setPasswordState] = useState("");
+  const [pinNeeded, setPinNeeded] = useState(false);
+  const [totpNeeded, setTotpNeeded] = useState(false);
+
+  // On mount: determine steps + try silent unlock
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      // Try recovery file env var
+      const recoveryFile = process.env.AUTHO_RECOVERY_FILE;
+      if (recoveryFile) {
+        try {
+          const { readFileSync } = await import("node:fs");
+          const content = readFileSync(recoveryFile, "utf8");
+          const lines = content.split("\n");
+          const idx = lines.findIndex((l) => l.trim() === "RECOVERY TOKEN:");
+          if (idx !== -1) {
+            const rawToken = lines.slice(idx + 1).find((l) => l.trim() !== "") ?? "";
+            const token = rawToken.replace(/-/g, "").toLowerCase();
+            if (token) {
+              const session = tryUnlockWithRecovery(vaultPath, token);
+              if (!cancelled && session) { onUnlock(session); return; }
+              if (!cancelled) setError("Recovery file failed — enter password instead");
+            } else {
+              if (!cancelled) setError("Recovery file is malformed — enter password instead");
+            }
+          } else {
+            if (!cancelled) setError("Recovery file is malformed — enter password instead");
+          }
+        } catch {
+          if (!cancelled) setError("Recovery file could not be read — enter password instead");
+        }
+      }
+
+      // Check which steps are needed
+      const pinSet = await hasPinSet(vaultPath);
+      if (!cancelled) setPinNeeded(pinSet);
+
+      const authConfig = VaultService.getAuthConfig(vaultPath);
+      if (!cancelled) setTotpNeeded(authConfig?.totp !== undefined);
+
+      if (!pinSet) {
+        // Try OS keychain
+        const pw = await loadVaultPassword(vaultPath);
+        if (!cancelled && pw && !authConfig?.totp) {
+          // Can silently unlock: password from keychain, no PIN, no TOTP
+          const session = tryUnlockWithPassword(vaultPath, pw);
+          if (!cancelled && session) { onUnlock(session); return; }
+        }
+        if (!cancelled && pw) {
+          // Has keychain password but TOTP required — pre-fill password, skip to totp
+          setPasswordState(pw);
+          if (!cancelled) setStep(authConfig?.totp ? "totp" : "password");
+          return;
+        }
+      }
+
+      if (!cancelled) setStep("password");
+    })();
+    return () => { cancelled = true; };
+  }, [vaultPath, onUnlock]);
+
+  const doUnlock = useCallback((pw: string, totp: string | undefined) => {
+    const creds: UnlockCredentials = { password: pw, totp };
+    try {
+      const session = VaultService.unlock(vaultPath, creds);
+      onUnlock(session);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setStep("password");
+      setPasswordState("");
+    }
+  }, [vaultPath, onUnlock]);
+
+  // Handler: password collected → move to next step
+  const handlePasswordSubmit = useCallback((pw: string) => {
+    setPasswordState(pw);
+    if (pinNeeded) {
+      setStep("pin");
+    } else if (totpNeeded) {
+      setStep("totp");
+    } else {
+      setStep("unlocking");
+      doUnlock(pw, undefined);
+    }
+  }, [pinNeeded, totpNeeded, doUnlock]);
+
+  // Handler: PIN verified → move to next step
+  const handlePinVerified = useCallback((pw: string) => {
+    if (totpNeeded) {
+      setStep("totp");
+    } else {
+      setStep("unlocking");
+      doUnlock(pw, undefined);
+    }
+  }, [totpNeeded, doUnlock]);
+
+  // Handler: TOTP code collected → unlock
+  const handleTotpSubmit = useCallback((totp: string) => {
+    setStep("unlocking");
+    doUnlock(password, totp);
+  }, [password, doUnlock]);
+
+  if (step === "loading" || step === "unlocking") {
+    return (
+      <box flexDirection="column" alignItems="center" justifyContent="center" width="100%" height="100%">
+        <text fg="#FFD700">{step === "loading" ? "Unlocking..." : "Verifying..."}</text>
+      </box>
+    );
+  }
 
   return (
     <box flexDirection="column" alignItems="center" justifyContent="center" width="100%" height="100%">
@@ -134,15 +381,16 @@ function PasswordScreen({ onUnlock, vaultPath }: {
         <ascii-font text="autho" font="tiny" color="#FFD700" />
         <text fg="#888888">Unlock your vault</text>
         {error ? <box backgroundColor="#331111" paddingX={1} width="100%"><text fg="#FF4444">{error}</text></box> : null}
-        <box flexDirection="row" gap={1} marginTop={1}>
-          <text fg="#AAAAAA">Password </text>
-          <box backgroundColor="#111111" flexGrow={1} paddingX={1} height={1}>
-            <text fg="#FFD700">{password ? "*".repeat(password.length) : ""}</text>
-          </box>
-        </box>
-        {unlocking
-          ? <text fg="#FFD700">Unlocking...</text>
-          : <text fg="#444444">Enter to unlock | Ctrl+C to exit</text>}
+        {step === "password" && (
+          <PasswordMethod vaultPath={vaultPath} onSubmit={handlePasswordSubmit} />
+        )}
+        {step === "pin" && (
+          <PinMethod vaultPath={vaultPath} password={password} onVerified={handlePinVerified} onError={setError} />
+        )}
+        {step === "totp" && (
+          <TotpMethod onSubmit={handleTotpSubmit} onError={setError} />
+        )}
+        <text fg="#444444">Enter to unlock | Ctrl+C to exit</text>
       </box>
     </box>
   );
@@ -911,7 +1159,7 @@ function EditScreen({ session, secret, onDone, onBack }: {
 // ─── App Root ────────────────────────────────────────────────────────
 
 function App({ vaultPath }: { vaultPath: string }) {
-  const [screen, setScreen] = useState<Screen>("password");
+  const [screen, setScreen] = useState<Screen>("unlock");
   const [session, setSession] = useState<VaultSession | null>(null);
   const [selectedSecret, setSelectedSecret] = useState<SecretRecord | null>(null);
   const { toast, show: showToast } = useToast();
@@ -929,9 +1177,9 @@ function App({ vaultPath }: { vaultPath: string }) {
     showToast(msg, msg.startsWith("Error:") ? "error" : "success");
   }, [goHome, showToast]);
 
-  if (screen === "password") {
+  if (screen === "unlock") {
     return (
-      <PasswordScreen vaultPath={vaultPath} onUnlock={(s) => { setSession(s); setScreen("home"); }} />
+      <UnlockScreen vaultPath={vaultPath} onUnlock={(s) => { setSession(s); setScreen("home"); }} />
     );
   }
 

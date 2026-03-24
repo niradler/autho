@@ -1,6 +1,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHmac,
   randomBytes,
   scryptSync,
 } from "node:crypto";
@@ -120,6 +121,109 @@ export function unlockRootKey(password: string, config: VaultConfig): Buffer {
   const key = deriveKeyFromPassword(password, config.kdf);
 
   return decryptWithKey(config.wrappedRootKey, key, "autho:vault-root");
+}
+
+// ---------------------------------------------------------------------------
+// TOTP helpers
+// ---------------------------------------------------------------------------
+
+function decodeBase32(input: string): Uint8Array {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const normalized = input.toUpperCase().replace(/=+$/g, "").replace(/\s+/g, "");
+  let bits = 0;
+  let value = 0;
+  const output: number[] = [];
+
+  for (const char of normalized) {
+    const index = alphabet.indexOf(char);
+    if (index === -1) {
+      throw new Error("OTP secret must be valid base32");
+    }
+    value = (value << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      output.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
+    }
+  }
+
+  return Uint8Array.from(output);
+}
+
+function generateTotpCode(
+  secret: string,
+  options: { algorithm?: string; digits?: number } | undefined,
+  now: number,
+): string {
+  const algorithm = (options?.algorithm ?? "sha1").toLowerCase();
+  const digits = options?.digits ?? 6;
+  const key = decodeBase32(secret);
+  const counter = Math.floor(now / 30_000);
+  const message = Buffer.alloc(8);
+  let cursor = counter;
+
+  for (let index = 7; index >= 0; index -= 1) {
+    message[index] = cursor & 0xff;
+    cursor >>= 8;
+  }
+
+  const hash = createHmac(algorithm, Buffer.from(key)).update(message).digest();
+  const offset = hash[hash.length - 1] & 0x0f;
+  const binary =
+    ((hash[offset] & 0x7f) << 24) |
+    ((hash[offset + 1] & 0xff) << 16) |
+    ((hash[offset + 2] & 0xff) << 8) |
+    (hash[offset + 3] & 0xff);
+  const mod = 10 ** digits;
+
+  return String(binary % mod).padStart(digits, "0");
+}
+
+export function generateTotpSecret(): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  const bytes = randomBytes(20);
+  let bits = 0;
+  let value = 0;
+  let result = "";
+
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      result += alphabet[(value >>> (bits - 5)) & 0x1f];
+      bits -= 5;
+    }
+  }
+
+  if (bits > 0) {
+    result += alphabet[(value << (5 - bits)) & 0x1f];
+  }
+
+  return result;
+}
+
+export function totpUri(secret: string, issuer: string, account: string): string {
+  return `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(account)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+}
+
+export function verifyTotpCode(
+  secret: string,
+  code: string,
+  opts?: { algorithm?: string; digits?: number },
+): boolean {
+  const digits = opts?.digits ?? 6;
+  if (code.length !== digits) {
+    return false;
+  }
+  const now = Date.now();
+
+  for (const offset of [-30_000, 0, 30_000]) {
+    if (generateTotpCode(secret, opts, now + offset) === code) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 
