@@ -1,6 +1,36 @@
+import { createInterface } from "node:readline/promises";
+
+/**
+ * Read a single line of visible input from the terminal.
+ * Throws if stdin is not a TTY.
+ */
+export async function readLine(prompt: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    throw new Error("Cannot read input: stdin is not a TTY");
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(prompt);
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * Ask a yes/no question. Returns true for yes, false for no.
+ * defaultYes controls the default when user just presses Enter.
+ */
+export async function confirm(question: string, defaultYes = true): Promise<boolean> {
+  const hint = defaultYes ? "Y/n" : "y/N";
+  const answer = (await readLine(`${question} (${hint}) `)).trim().toLowerCase();
+  if (answer === "") return defaultYes;
+  return answer === "y" || answer === "yes";
+}
+
 /**
  * Secure masked password input - reads from stdin char-by-char,
  * echoing * instead of the actual characters.
+ * Raw mode is required here because we need to intercept each keypress.
  */
 export async function readPasswordMasked(prompt = "Master password: "): Promise<string> {
   if (!process.stdin.isTTY) {
@@ -18,7 +48,6 @@ export async function readPasswordMasked(prompt = "Master password: "): Promise<
     const onData = (char: string) => {
       const code = char.charCodeAt(0);
 
-      // Enter / Return
       if (char === "\r" || char === "\n") {
         cleanup();
         process.stdout.write("\n");
@@ -26,7 +55,6 @@ export async function readPasswordMasked(prompt = "Master password: "): Promise<
         return;
       }
 
-      // Ctrl+C
       if (code === 3) {
         cleanup();
         process.stdout.write("\n");
@@ -34,7 +62,6 @@ export async function readPasswordMasked(prompt = "Master password: "): Promise<
         return;
       }
 
-      // Ctrl+D (EOF)
       if (code === 4) {
         cleanup();
         process.stdout.write("\n");
@@ -42,7 +69,6 @@ export async function readPasswordMasked(prompt = "Master password: "): Promise<
         return;
       }
 
-      // Backspace / Delete
       if (code === 127 || code === 8) {
         if (password.length > 0) {
           password = password.slice(0, -1);
@@ -51,12 +77,8 @@ export async function readPasswordMasked(prompt = "Master password: "): Promise<
         return;
       }
 
-      // Escape sequences (arrows, etc.) - ignore
-      if (code === 27) {
-        return;
-      }
+      if (code === 27) return;
 
-      // Regular printable character
       if (code >= 32) {
         password += char;
         process.stdout.write("*");

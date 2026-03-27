@@ -35,7 +35,7 @@ bun install -g autho
 - Folder decryption validates paths against **directory traversal**
 - SQLite vault files are hardened to `0600` permissions
 - Local daemon auth tokens use OS secret storage when available (falls back to file)
-- Master password stored in OS secret store after `init` — no repeated prompts
+- Master password can be saved to OS secret store via setup wizard (`autho init`) — no repeated prompts
 - PIN is a local machine gate stored in the OS keychain — it does not travel with the vault file and provides no cryptographic protection of vault data
 - Audit events record access patterns without storing secret values
 - Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
@@ -60,9 +60,9 @@ bun run hooks:install
 bun run autho -- init --password "correct horse battery staple"
 ```
 
-On init the master password is automatically saved to the native OS secret store (macOS Keychain, Linux Secret Service, Windows Credential Manager). After that, all commands — CLI, TUI, and agents — unlock silently without prompting.
+The setup wizard will guide you through optional security features — save your master password to the OS keychain, set a local PIN, or enable TOTP. After saving to the keychain, all commands unlock silently without prompting.
 
-To opt out: `AUTHO_DISABLE_OS_SECRETS=1`
+To opt out of OS secret store usage: `AUTHO_DISABLE_OS_SECRETS=1`
 
 By default, Autho stores runtime state in `~/.autho`. For tests, CI, or isolated environments you can override that with `AUTHO_HOME`.
 
@@ -148,11 +148,18 @@ cd apps/cli && npm publish
 
 The package includes only `dist/autho.js` and `README.md` (~15 KB tarball).
 
-## Migration
+## Upgrading
 
-This Bun release supports migration from legacy JSON backups and documented manual migration from older `conf`-based installs. Direct in-product `conf` store migration is intentionally not part of this release.
+If you already have a vault from a previous version, just update and run any command:
 
-See [MIGRATION.md](./MIGRATION.md) for the supported process and the expected JSON format.
+```bash
+bun install -g autho@latest
+autho secrets list --password "..."
+```
+
+The setup wizard will offer to save your master password to the OS keychain. After that, all commands unlock silently.
+
+See [MIGRATION.md](./MIGRATION.md) for full details and legacy import instructions.
 
 ## Testing
 
@@ -191,7 +198,7 @@ bun test
 Autho is designed for coding agents that need secrets at runtime:
 
 ```bash
-# After init, the master password is in the OS secret store — no env var needed
+# After saving to OS keychain via `autho init` — no env var needed
 autho lease create --secret github --secret openai --ttl 300 --json
 autho exec --lease <id> --map GITHUB_TOKEN=github --map OPENAI_KEY=openai -- node build.js
 autho lease revoke --lease <id>

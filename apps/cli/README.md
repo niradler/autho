@@ -28,7 +28,9 @@ autho secrets get --password "..." --ref github --json
 autho otp code --password "..." --ref my-totp --json
 ```
 
-You can also set `AUTHO_MASTER_PASSWORD` to avoid passing `--password` on every call.
+Run `autho init` to save your master password to the native OS secret store (macOS Keychain, Linux Secret Service, Windows Credential Manager). After that, all commands unlock silently without prompting.
+
+You can also set `AUTHO_MASTER_PASSWORD` to avoid passing `--password` on every call, or set `AUTHO_DISABLE_OS_SECRETS=1` to opt out of OS secret storage.
 
 ## Features
 
