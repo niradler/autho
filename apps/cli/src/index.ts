@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
-import { readPasswordMasked } from "./password.ts";
+import { confirm, readPasswordMasked } from "./password.ts";
 
 import {
   daemonExec,
@@ -26,9 +26,11 @@ import {
 } from "../../../packages/core/src/index.ts";
 import {
   deleteOsSecret,
+  deleteVaultPassword,
   getOsSecret,
   hasPinSet,
   loadVaultPassword,
+  osSecretsDisabled,
   setOsSecret,
   storePinHash,
   storeVaultPassword,
@@ -315,81 +317,111 @@ async function resolveUnlockCredentials(
   return creds;
 }
 
+function osKeychainName(): string {
+  const p = process.platform;
+  if (p === "darwin") return "macOS Keychain";
+  if (p === "win32") return "Windows Credential Manager";
+  return "Secret Service (libsecret)";
+}
+
 async function runInitWizard(vaultPath: string, password: string, existingCreds?: UnlockCredentials): Promise<void> {
-  const isReconfigure = existingCreds !== undefined;
   const creds: UnlockCredentials = existingCreds ?? { password };
 
-  while (true) {
-    const authConfig = VaultService.getAuthConfig(vaultPath);
+  console.log("");
+
+  // ── OS Keychain ──────────────────────────────────────────────────
+  if (!osSecretsDisabled()) {
+    const passwordStored = (await loadVaultPassword(vaultPath)) !== null;
+
+    if (passwordStored) {
+      console.log(`\x1b[32m✓\x1b[0m Master password is saved in ${osKeychainName()}.`);
+      if (await confirm("  Remove it?", false)) {
+        const deleted = await deleteVaultPassword(vaultPath);
+        console.log(deleted ? "  Removed." : "  Could not remove.");
+      }
+    } else {
+      console.log(`\x1b[33m?\x1b[0m Save master password to ${osKeychainName()}?`);
+      console.log("  This lets all vault commands unlock without prompting on this machine.");
+      if (await confirm("  Save to keychain?")) {
+        const stored = await storeVaultPassword(vaultPath, password);
+        console.log(stored ? "  \x1b[32m✓\x1b[0m Saved." : "  Could not save — OS secret store may be unavailable.");
+      } else {
+        console.log("  Skipped.");
+      }
+    }
+    console.log("");
+  }
+
+  // ── PIN ──────────────────────────────────────────────────────────
+  if (!osSecretsDisabled()) {
     const pinSet = await hasPinSet(vaultPath);
-    const totpEnabled = authConfig?.totp !== undefined;
 
-    console.log("");
-    if (isReconfigure) {
-      console.log("Security factors:");
-    } else {
-      console.log("Configure security factors (you can change these anytime with: autho init)");
-    }
-    console.log(`  [P] PIN  — ${pinSet ? "SET on this machine" : "not set"}   → toggle`);
-    console.log(`  [T] TOTP — ${totpEnabled ? "ENABLED" : "not enabled"}   → toggle`);
-    console.log("  [S] Done");
-    console.log("");
-
-    const choice = (await readPasswordMasked("Choice [P/T/S]: ")).trim().toUpperCase();
-
-    if (choice === "S" || choice === "") {
-      console.log("Security configuration complete.");
-      break;
-    }
-
-    if (choice === "P") {
-      if (pinSet) {
-        // Remove PIN
-        const confirmPin = await readPasswordMasked("Enter current PIN to confirm removal: ");
-        const ok = await verifyPin(vaultPath, confirmPin);
-        if (!ok) { console.log("Wrong PIN, not removed."); continue; }
-        await deletePin(vaultPath);
-        console.log("PIN removed from this machine.");
-      } else {
-        // Set PIN
-        const newPin = await readPasswordMasked("New PIN: ");
-        if (!newPin) { console.log("PIN cannot be empty."); continue; }
-        const confirmPin = await readPasswordMasked("Confirm PIN: ");
-        if (newPin !== confirmPin) { console.log("PINs do not match."); continue; }
-        await storePinHash(vaultPath, newPin);
-        console.log("PIN set. You will be prompted for it on this machine before unlocking.");
-      }
-    } else if (choice === "T") {
-      if (totpEnabled) {
-        // Remove TOTP
-        const totpCode = await readPasswordMasked("Enter current TOTP code to confirm removal: ");
-        const removeCreds: UnlockCredentials = { ...creds, totp: totpCode };
-        try {
-          VaultService.removeTotp(vaultPath, removeCreds);
-          console.log("TOTP disabled.");
-        } catch (e) {
-          console.log(`Error: ${e instanceof Error ? e.message : String(e)}`);
-        }
-      } else {
-        // Enable TOTP
-        const { secret, uri } = VaultService.setupTotp(vaultPath);
-        console.log("");
-        console.log("TOTP Secret:", secret);
-        console.log("Scan in your authenticator app:");
-        console.log(uri);
-        console.log("");
-        const code = await readPasswordMasked("Enter the 6-digit code to confirm: ");
-        try {
-          VaultService.enableTotp(vaultPath, creds, secret, code);
-          console.log("TOTP enabled. You will need your authenticator app to unlock this vault.");
-        } catch (e) {
-          console.log(`Error: ${e instanceof Error ? e.message : String(e)}`);
+    if (pinSet) {
+      console.log("\x1b[32m✓\x1b[0m PIN is set on this machine.");
+      if (await confirm("  Remove PIN?", false)) {
+        const pin = await readPasswordMasked("  Enter current PIN: ");
+        const ok = await verifyPin(vaultPath, pin);
+        if (ok) {
+          await deletePin(vaultPath);
+          console.log("  Removed.");
+        } else {
+          console.log("  Wrong PIN, not removed.");
         }
       }
     } else {
-      console.log("Unknown choice. Enter P, T, or S.");
+      if (await confirm("Set up a PIN for quick unlock on this machine?", false)) {
+        const newPin = await readPasswordMasked("  New PIN: ");
+        if (!newPin) {
+          console.log("  PIN cannot be empty, skipped.");
+        } else {
+          const confirmPin = await readPasswordMasked("  Confirm PIN: ");
+          if (newPin !== confirmPin) {
+            console.log("  PINs do not match, skipped.");
+          } else {
+            await storePinHash(vaultPath, newPin);
+            console.log("  \x1b[32m✓\x1b[0m PIN set.");
+          }
+        }
+      }
+    }
+    console.log("");
+  }
+
+  // ── TOTP ─────────────────────────────────────────────────────────
+  const authConfig = VaultService.getAuthConfig(vaultPath);
+  const totpEnabled = authConfig?.totp !== undefined;
+
+  if (totpEnabled) {
+    console.log("\x1b[32m✓\x1b[0m TOTP is enabled (authenticator app required to unlock).");
+    if (await confirm("  Disable TOTP?", false)) {
+      const code = await readPasswordMasked("  Enter current TOTP code: ");
+      try {
+        VaultService.removeTotp(vaultPath, { ...creds, totp: code });
+        console.log("  Disabled.");
+      } catch (e) {
+        console.log(`  Error: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  } else {
+    if (await confirm("Enable TOTP (authenticator app verification)?", false)) {
+      const { secret, uri } = VaultService.setupTotp(vaultPath);
+      console.log("");
+      console.log(`  Secret: ${secret}`);
+      console.log(`  URI:    ${uri}`);
+      console.log("");
+      console.log("  Add this to your authenticator app, then enter the 6-digit code.");
+      const code = await readPasswordMasked("  Code: ");
+      try {
+        VaultService.enableTotp(vaultPath, creds, secret, code);
+        console.log("  \x1b[32m✓\x1b[0m TOTP enabled.");
+      } catch (e) {
+        console.log(`  Error: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
   }
+
+  console.log("");
+  console.log("Setup complete. Run \x1b[1mautho init\x1b[0m anytime to change these settings.");
 }
 
 async function runWebServer(vaultPath: string, args: ParsedArgs): Promise<void> {
@@ -476,7 +508,7 @@ function help(): string {
     "  master password with masked input (no --password flag needed).",
     "",
     "  For automation and coding agents, use one of:",
-    "    autho init (or rerun)             Stores master password in the native OS secret store automatically",
+    "    autho init                        Setup wizard — choose to save password in OS keychain, set PIN, enable TOTP",
     "    AUTHO_MASTER_PASSWORD=<value>    Environment variable (master password)",
     "    AUTHO_PIN=<value>                Environment variable (PIN, if set on this machine)",
     "    AUTHO_TOTP_CODE=<value>          Environment variable (TOTP code, if enabled)",
@@ -555,23 +587,18 @@ async function main(): Promise<void> {
       // First run: create vault
       const pw = required(password, "--password");
       output(VaultService.initialize(vaultPath, pw), jsonMode);
-      const stored = await storeVaultPassword(vaultPath, pw);
-      if (stored && !jsonMode) {
-        console.log("Master password saved to OS secret store. You won't be prompted again on this machine.");
-      }
 
-      // Security wizard (TTY only, not in --json mode)
+      // Interactive setup wizard (TTY only, not in --json mode)
       if (process.stdin.isTTY && !jsonMode) {
         await runInitWizard(vaultPath, pw);
       }
     } else {
       // Reconfigure: full security check first
       const creds = await resolveUnlockCredentials(vaultPath, args, password);
-      // Credentials verified — now run wizard
       if (process.stdin.isTTY && !jsonMode) {
         await runInitWizard(vaultPath, creds.password, creds);
       } else {
-        console.log("Vault already initialized. Use interactive mode (TTY) to reconfigure security factors.");
+        console.log("Vault already initialized. Use interactive mode (TTY) to reconfigure.");
       }
     }
     return;

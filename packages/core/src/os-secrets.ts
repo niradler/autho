@@ -55,6 +55,25 @@ export async function loadVaultPassword(vaultPath: string): Promise<string | nul
 }
 
 /**
+ * Delete the master password for a vault from the OS secret store.
+ * Returns true if deleted, false if not found or unavailable.
+ */
+export async function deleteVaultPassword(vaultPath: string): Promise<boolean> {
+  if (osSecretsDisabled()) {
+    return false;
+  }
+
+  try {
+    return await Bun.secrets.delete({
+      name: vaultPasswordName(vaultPath),
+      service: VAULT_PASSWORD_SERVICE,
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Store a named secret in the OS secret store.
  * Returns true on success, false if the backend is unavailable or disabled.
  */

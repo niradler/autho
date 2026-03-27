@@ -1,5 +1,25 @@
 # Migration To Bun Autho
 
+## Upgrading From 3.0.0 (OS Secret Store Integration)
+
+This version adds the ability to save your master password in the native OS secret store (macOS Keychain, Linux Secret Service, Windows Credential Manager) so vault commands unlock without prompting. This is opt-in through the setup wizard.
+
+**Upgrade steps:**
+
+1. Update autho: `bun install -g autho@latest`
+2. Run the setup wizard: `autho init`
+3. Enter your master password when prompted (to verify vault ownership).
+4. The wizard will ask if you want to save your password to the OS keychain — confirm with `y`.
+5. Done — all future commands unlock silently.
+
+You can re-run `autho init` anytime to change settings (add/remove keychain storage, PIN, or TOTP).
+
+To opt out of all OS secret store usage, set `AUTHO_DISABLE_OS_SECRETS=1`.
+
+---
+
+## Migrating From Legacy (conf-based) Installs
+
 This release closes the Bun migration for the supported Autho feature set. The supported migration path is deliberately simple:
 
 - If you already have a legacy JSON backup, import it directly.
