@@ -1,6 +1,6 @@
 {
   "name": "autho",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Local-first secret manager for humans and coding agents, rebuilt on Bun",
   "type": "module",
   "bin": {
