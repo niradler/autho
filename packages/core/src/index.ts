@@ -295,7 +295,8 @@ function projectMappingsForStatus(projectFile?: string): { path: string | null; 
   };
 }
 
-export { defaultProjectFilePath, defaultVaultPath } from "./paths.ts";
+export { defaultProjectFilePath, defaultVaultPath, authoConfigDir, configFilePath, loadConfig, saveConfig, resetConfigCache } from "./paths.ts";
+export type { AuthoConfig } from "./paths.ts";
 
 export function resolveMappings(options: {
   maps?: string[];
