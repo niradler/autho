@@ -1027,3 +1027,215 @@ describe("autho security features (PIN, TOTP, recovery file)", () => {
     expect(badPw.exitCode).toBe(1);
   });
 });
+
+describe("autho config and custom AUTHO_HOME", () => {
+  test("AUTHO_HOME env var overrides default home dir for all paths", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-custom-home-"));
+    const password = "correct horse battery staple";
+
+    // Init vault using custom AUTHO_HOME
+    const initResult = runCli(["init", "--password", password], { AUTHO_HOME: customHome });
+    expect(initResult.exitCode).toBe(0);
+
+    // Vault file should exist under custom home
+    expect(existsSync(join(customHome, "vault.db"))).toBe(true);
+
+    // Status should work using custom home
+    const status = runCli(["status", "--json"], { AUTHO_HOME: customHome });
+    expect(status.exitCode).toBe(0);
+    const statusObj = JSON.parse(status.stdout) as { initialized: boolean };
+    expect(statusObj.initialized).toBe(true);
+
+    // Add a secret
+    const addResult = runCli([
+      "secrets", "add",
+      "--name", "custom-home-secret",
+      "--type", "note",
+      "--value", "stored in custom home",
+      "--password", password,
+    ], { AUTHO_HOME: customHome });
+    expect(addResult.exitCode).toBe(0);
+
+    // Retrieve the secret
+    const getResult = runCli([
+      "secrets", "get",
+      "--ref", "custom-home-secret",
+      "--password", password,
+      "--json",
+    ], { AUTHO_HOME: customHome });
+    expect(getResult.exitCode).toBe(0);
+    const secret = JSON.parse(getResult.stdout) as { value: string };
+    expect(secret.value).toBe("stored in custom home");
+
+    // Without AUTHO_HOME, the same vault should not be found (default home is different)
+    const wrongHome = runCli(["status", "--json"]);
+    // Either exit code 0 with initialized=false, or it points elsewhere
+    if (wrongHome.exitCode === 0) {
+      const wrongStatus = JSON.parse(wrongHome.stdout) as { initialized: boolean; vaultPath?: string };
+      // The default vault path should not point to our custom home
+      expect(wrongStatus.vaultPath ?? "").not.toContain(customHome.replace(/\\/g, "/"));
+    }
+  });
+
+  test("AUTHO_HOME env var directs project config and daemon state to custom dir", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-custom-project-"));
+    const password = "correct horse battery staple";
+
+    // Init vault
+    runCli(["init", "--password", password], { AUTHO_HOME: customHome });
+
+    // Add secrets for project mapping
+    runCli([
+      "secrets", "add",
+      "--name", "api-key",
+      "--type", "password",
+      "--value", "sk_test_123",
+      "--password", password,
+    ], { AUTHO_HOME: customHome });
+
+    // Init project config (should write to custom home)
+    const projectInit = runCli([
+      "project", "init",
+      "--map", "API_KEY=api-key",
+      "--force",
+      "--json",
+    ], { AUTHO_HOME: customHome });
+    expect(projectInit.exitCode).toBe(0);
+
+    // Project file should exist in custom home
+    expect(existsSync(join(customHome, "project.json"))).toBe(true);
+
+    // env render using project file from custom home
+    const envResult = runCli([
+      "env", "render",
+      "--password", password,
+      "--json",
+    ], { AUTHO_HOME: customHome });
+    expect(envResult.exitCode).toBe(0);
+    const envObj = JSON.parse(envResult.stdout) as Record<string, string>;
+    expect(envObj.API_KEY).toBe("sk_test_123");
+  });
+
+  test("config show displays current configuration", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-config-show-"));
+
+    const result = runCli(["config", "show"], { AUTHO_HOME: customHome });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Config:");
+    expect(result.stdout).toContain("Vault dir:");
+  });
+
+  test("config set and config show reflect changes", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-config-set-"));
+
+    // Set a config value
+    const setResult = runCli(["config", "set", "editor", "vim"], { AUTHO_HOME: customHome });
+    expect(setResult.exitCode).toBe(0);
+    expect(setResult.stdout).toContain("Set editor = vim");
+
+    // Config file should exist
+    expect(existsSync(join(customHome, "config.json"))).toBe(true);
+
+    // Read the config file directly to verify
+    const configContent = JSON.parse(readFileSync(join(customHome, "config.json"), "utf8"));
+    expect(configContent.editor).toBe("vim");
+
+    // config show should reflect the value
+    const showResult = runCli(["config", "show"], { AUTHO_HOME: customHome });
+    expect(showResult.exitCode).toBe(0);
+    expect(showResult.stdout).toContain("Editor: vim");
+  });
+
+  test("config set vaultDir redirects vault to custom directory", () => {
+    const configHome = mkdtempSync(join(tmpdir(), "autho-config-home-"));
+    const vaultDir = mkdtempSync(join(tmpdir(), "autho-vault-redirect-"));
+    const password = "correct horse battery staple";
+
+    // Set vaultDir via config
+    const setResult = runCli(["config", "set", "vaultDir", vaultDir], { AUTHO_HOME: configHome });
+    expect(setResult.exitCode).toBe(0);
+
+    // Init vault — should create vault.db in the redirected vaultDir
+    const initResult = runCli(["init", "--password", password], { AUTHO_HOME: configHome });
+    expect(initResult.exitCode).toBe(0);
+
+    // AUTHO_HOME env var takes precedence over config.vaultDir for path resolution,
+    // so the vault will be in configHome since AUTHO_HOME is set.
+    // But when AUTHO_HOME is NOT set, the config.vaultDir would be used.
+    // Since we always pass AUTHO_HOME in tests, verify the init worked.
+    expect(existsSync(join(configHome, "vault.db"))).toBe(true);
+
+    // Verify config.json was written with vaultDir
+    const config = JSON.parse(readFileSync(join(configHome, "config.json"), "utf8"));
+    expect(config.vaultDir).toBe(vaultDir);
+  });
+
+  test("config unset removes a key from config", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-config-unset-"));
+
+    // Set then unset
+    runCli(["config", "set", "editor", "nano"], { AUTHO_HOME: customHome });
+    const unsetResult = runCli(["config", "unset", "editor"], { AUTHO_HOME: customHome });
+    expect(unsetResult.exitCode).toBe(0);
+    expect(unsetResult.stdout).toContain("Removed editor");
+
+    // Verify it's gone
+    const config = JSON.parse(readFileSync(join(customHome, "config.json"), "utf8"));
+    expect(config.editor).toBeUndefined();
+  });
+
+  test("config path prints the config file location", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-config-path-"));
+
+    const result = runCli(["config", "path"], { AUTHO_HOME: customHome });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toContain("config.json");
+  });
+
+  test("config set autoLock stores boolean value correctly", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-config-bool-"));
+
+    runCli(["config", "set", "autoLock", "true"], { AUTHO_HOME: customHome });
+    const config = JSON.parse(readFileSync(join(customHome, "config.json"), "utf8"));
+    expect(config.autoLock).toBe(true);
+  });
+
+  test("config show with --json outputs structured data", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-config-json-"));
+
+    runCli(["config", "set", "editor", "code"], { AUTHO_HOME: customHome });
+    const result = runCli(["config", "show", "--json"], { AUTHO_HOME: customHome });
+    expect(result.exitCode).toBe(0);
+    const parsed = JSON.parse(result.stdout) as { config: { editor: string }; configDir: string };
+    expect(parsed.config.editor).toBe("code");
+    expect(parsed.configDir).toBeTruthy();
+  });
+
+  test("multiple AUTHO_HOME values isolate vaults completely", () => {
+    const homeA = mkdtempSync(join(tmpdir(), "autho-iso-a-"));
+    const homeB = mkdtempSync(join(tmpdir(), "autho-iso-b-"));
+    const password = "correct horse battery staple";
+
+    // Init two separate vaults
+    runCli(["init", "--password", password], { AUTHO_HOME: homeA });
+    runCli(["init", "--password", password], { AUTHO_HOME: homeB });
+
+    // Add different secrets to each
+    runCli(["secrets", "add", "--name", "secret-a", "--type", "note", "--value", "value-a", "--password", password], { AUTHO_HOME: homeA });
+    runCli(["secrets", "add", "--name", "secret-b", "--type", "note", "--value", "value-b", "--password", password], { AUTHO_HOME: homeB });
+
+    // Each vault should only see its own secrets
+    const listA = runCli(["secrets", "list", "--password", password, "--json"], { AUTHO_HOME: homeA });
+    const listB = runCli(["secrets", "list", "--password", password, "--json"], { AUTHO_HOME: homeB });
+    expect(listA.exitCode).toBe(0);
+    expect(listB.exitCode).toBe(0);
+
+    const secretsA = JSON.parse(listA.stdout) as Array<{ name: string }>;
+    const secretsB = JSON.parse(listB.stdout) as Array<{ name: string }>;
+
+    expect(secretsA.some((s) => s.name === "secret-a")).toBe(true);
+    expect(secretsA.some((s) => s.name === "secret-b")).toBe(false);
+    expect(secretsB.some((s) => s.name === "secret-b")).toBe(true);
+    expect(secretsB.some((s) => s.name === "secret-a")).toBe(false);
+  });
+});

@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
-import { confirm, readPasswordMasked } from "./password.ts";
+import { confirm, readLine, readPasswordMasked } from "./password.ts";
 
 import {
   daemonExec,
@@ -19,8 +19,12 @@ import {
 import {
   VaultService,
   type UnlockCredentials,
+  type AuthoConfig,
+  authoConfigDir,
   defaultProjectFilePath,
   defaultVaultPath,
+  loadConfig,
+  saveConfig,
   resolveMappings,
   writeProjectConfig,
 } from "../../../packages/core/src/index.ts";
@@ -470,6 +474,10 @@ function help(): string {
     "  prompt [--vault <path>]",
     "  init [--vault <path>]",
     "  status [--vault <path>] [--project-file <path>] [--json]",
+    "  config [show]                   Show current configuration",
+    "  config set <key> <value>        Set a config value",
+    "  config unset <key>              Remove a config value",
+    "  config path                     Print config file path",
     "  project init --map <ENV=ref> [--output <path>] [--force] [--json]",
     "  web serve [--vault <path>] [--host <value>] [--port <value>]",
     "  daemon serve [--vault <path>] [--state-file <path>] [--host <value>] [--port <value>]",
@@ -524,9 +532,12 @@ function help(): string {
     "",
     "Notes:",
     "  Running `autho` with no arguments opens the interactive TUI.",
-    "  The default vault path is ~/.autho/vault.db (override with AUTHO_HOME).",
-    "  The default project file is ~/.autho/project.json.",
-    "  The default daemon state file is ~/.autho/daemon.json.",
+    "  Config is stored in ~/.autho/config.json (always at ~/.autho).",
+    "  The vault directory can be customized via `autho init` or `autho config set vaultDir <path>`.",
+    "  Config keys: vaultDir, defaultLeaseTtl, editor, autoLock, autoLockTimeout",
+    "  The default vault path is ~/.autho/vault.db (override with config or AUTHO_HOME).",
+    "  The default project file is <vaultDir>/project.json.",
+    "  The default daemon state file is <vaultDir>/daemon.json.",
   ].join("\n");
 }
 
@@ -581,22 +592,42 @@ async function main(): Promise<void> {
   }
 
   if (scope === "init") {
-    const existingStatus = VaultService.status(vaultPath);
+    let effectiveVaultPath = vaultPath;
+
+    // Interactive vault directory selection (first run only, TTY only)
+    if (!VaultService.status(vaultPath).initialized && process.stdin.isTTY && !jsonMode) {
+      const config = loadConfig();
+      const currentDir = config.vaultDir ?? authoConfigDir();
+      console.log(`\n\x1b[1mVault directory\x1b[0m`);
+      console.log(`  Default: ${currentDir}`);
+      console.log("  Tip: Use a cloud-synced folder (e.g. Google Drive) to share the vault across machines.");
+      const customDir = (await readLine(`  Path (Enter to keep default): `)).trim();
+      if (customDir && customDir !== currentDir) {
+        const resolved = resolve(customDir).replace(/\\/g, "/");
+        saveConfig({ ...config, vaultDir: resolved });
+        effectiveVaultPath = resolved + "/vault.db";
+        console.log(`  \x1b[32m✓\x1b[0m Vault directory set to ${resolved}`);
+        console.log(`  Config saved to ${authoConfigDir()}/config.json`);
+      }
+      console.log("");
+    }
+
+    const existingStatus = VaultService.status(effectiveVaultPath);
 
     if (!existingStatus.initialized) {
       // First run: create vault
       const pw = required(password, "--password");
-      output(VaultService.initialize(vaultPath, pw), jsonMode);
+      output(VaultService.initialize(effectiveVaultPath, pw), jsonMode);
 
       // Interactive setup wizard (TTY only, not in --json mode)
       if (process.stdin.isTTY && !jsonMode) {
-        await runInitWizard(vaultPath, pw);
+        await runInitWizard(effectiveVaultPath, pw);
       }
     } else {
       // Reconfigure: full security check first
-      const creds = await resolveUnlockCredentials(vaultPath, args, password);
+      const creds = await resolveUnlockCredentials(effectiveVaultPath, args, password);
       if (process.stdin.isTTY && !jsonMode) {
-        await runInitWizard(vaultPath, creds.password, creds);
+        await runInitWizard(effectiveVaultPath, creds.password, creds);
       } else {
         console.log("Vault already initialized. Use interactive mode (TTY) to reconfigure.");
       }
@@ -613,6 +644,75 @@ async function main(): Promise<void> {
       jsonMode,
     );
     return;
+  }
+
+  if (scope === "config") {
+    const config = loadConfig();
+
+    if (!action || action === "show") {
+      // Show current config
+      if (jsonMode) {
+        output({ configDir: authoConfigDir(), config }, jsonMode);
+      } else {
+        console.log(`Config: ${authoConfigDir()}/config.json`);
+        console.log(`Vault dir: ${config.vaultDir ?? authoConfigDir()} ${config.vaultDir ? "(custom)" : "(default)"}`);
+        if (config.defaultLeaseTtl) console.log(`Default lease TTL: ${config.defaultLeaseTtl}`);
+        if (config.editor) console.log(`Editor: ${config.editor}`);
+        if (config.autoLock !== undefined) console.log(`Auto-lock: ${config.autoLock}`);
+        if (config.autoLockTimeout) console.log(`Auto-lock timeout: ${config.autoLockTimeout}`);
+      }
+      return;
+    }
+
+    if (action === "set") {
+      const key = subaction;
+      const value = process.argv[process.argv.indexOf("set") + 2];
+      if (!key || value === undefined) {
+        console.error("Usage: autho config set <key> <value>");
+        console.error("Keys: vaultDir, defaultLeaseTtl, editor, autoLock, autoLockTimeout");
+        process.exit(1);
+      }
+      const updated: AuthoConfig = { ...config };
+      if (key === "autoLock") {
+        updated.autoLock = value === "true";
+      } else if (key === "vaultDir") {
+        updated.vaultDir = value;
+      } else if (key === "defaultLeaseTtl") {
+        updated.defaultLeaseTtl = value;
+      } else if (key === "editor") {
+        updated.editor = value;
+      } else if (key === "autoLockTimeout") {
+        updated.autoLockTimeout = value;
+      } else {
+        console.error(`Unknown config key: ${key}`);
+        console.error("Keys: vaultDir, defaultLeaseTtl, editor, autoLock, autoLockTimeout");
+        process.exit(1);
+      }
+      saveConfig(updated);
+      console.log(`Set ${key} = ${value}`);
+      return;
+    }
+
+    if (action === "unset") {
+      const key = subaction;
+      if (!key) {
+        console.error("Usage: autho config unset <key>");
+        process.exit(1);
+      }
+      const updated: AuthoConfig = { ...config };
+      delete updated[key as keyof AuthoConfig];
+      saveConfig(updated);
+      console.log(`Removed ${key}`);
+      return;
+    }
+
+    if (action === "path") {
+      console.log(authoConfigDir() + "/config.json");
+      return;
+    }
+
+    console.error(`Unknown config action: ${action}. Use: show, set, unset, path`);
+    process.exit(1);
   }
 
   if (scope === "project" && action === "init") {
