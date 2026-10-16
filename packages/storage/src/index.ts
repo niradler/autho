@@ -239,7 +239,7 @@ export class AuthoDatabase {
 
   updateSecret(id: string, updates: { name?: string; payload?: string; type?: string; updatedAt: string }): void {
     const parts: string[] = [];
-    const values: unknown[] = [];
+    const values: string[] = [];
     let idx = 1;
 
     if (updates.name !== undefined) {

@@ -131,6 +131,8 @@ async function typecheck(): Promise<void> {
       entrypoints: ["./apps/cli/src/index.ts"],
       outdir: "./tmp/quality/cli",
       target: "bun",
+      // OpenTUI lazy-loads one native package per platform; only this platform's is installed.
+      external: ["@opentui/core", "@opentui/react", "react"],
     }),
     Bun.build({
       entrypoints: ["./apps/daemon/src/index.ts"],
@@ -153,6 +155,12 @@ async function typecheck(): Promise<void> {
 
   if (failures.length > 0 || results.some((result) => !result.success)) {
     throw new Error(failures.join("\n") || "Typecheck build failed");
+  }
+
+  // Bun.build only bundles; tsc is what actually checks types.
+  const tsc = Bun.spawnSync(["bun", "x", "tsc", "--noEmit", "-p", "."], { cwd: repoRoot });
+  if (tsc.exitCode !== 0) {
+    throw new Error(`tsc failed:\n${tsc.stdout.toString()}${tsc.stderr.toString()}`);
   }
 }
 
