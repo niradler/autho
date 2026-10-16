@@ -312,6 +312,8 @@ bun run autho
 - Unlock: the password stays masked, including pasted text; `ctrl+r` shows it.
 - `c` copies the password → paste it elsewhere → after 30s the clipboard is empty (unless you copied something else).
 - `u` copies the username; `w` copies the URL.
+- `e` edits: the password field starts empty; `ctrl+r` (from any field) loads and shows the stored value, you can edit it, `ctrl+s` saves.
+- `G` jumps to the last secret, `g` to the first.
 - `s` reveals the value; it stays visible for 30s. Drag-select part of it with the mouse → toast "Selected N characters" → `ctrl+c` copies exactly that.
 - `ctrl+c` with nothing selected copies the focused value and shows "ctrl+c again to quit"; a second `ctrl+c` within 2s quits.
 - Quit right after copying → the clipboard is still cleared about 30s later.

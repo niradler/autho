@@ -177,7 +177,7 @@ export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLock
     const current = sessionRef.current;
     if (!current) return;
     try {
-      // The form never shows the stored value; drop it straight away.
+      // The form loads the stored value only on Ctrl+R; drop it here.
       const record = current.getSecret(id);
       setRoute({ name: "form", editing: { ...record, value: "" } });
     } catch (e) {
@@ -226,7 +226,6 @@ export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLock
         flexDirection="column"
         width="100%"
         height="100%"
-        backgroundColor={theme.bg}
         onMouseDown={() => { lastActivity.current = Date.now(); }}
         onMouseScroll={() => { lastActivity.current = Date.now(); }}
       >

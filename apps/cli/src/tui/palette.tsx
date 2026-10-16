@@ -1,7 +1,7 @@
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { useMemo, useRef, useState } from "react";
 
-import { TextField } from "./components.tsx";
+import { Chip, TextField } from "./components.tsx";
 import type { Command } from "./context.tsx";
 import { theme } from "./theme.ts";
 import { fuzzyFilter, isEnter, truncate } from "./util.ts";
@@ -47,9 +47,9 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
 
   return (
     <box position="absolute" top={2} left={Math.max(0, Math.floor((width - boxWidth) / 2))} width={boxWidth} zIndex={100}>
-      <box flexDirection="column" border borderStyle="rounded" borderColor={theme.borderFocus} backgroundColor={theme.panel} paddingX={1} title=" Commands " titleAlignment="center">
+      <box flexDirection="column" border borderStyle="rounded" borderColor={theme.borderFocus} backgroundColor={theme.panel} paddingX={1} title=" Commands " titleColor={theme.accent} titleAlignment="center">
         <box flexDirection="row" height={1} gap={1}>
-          <text fg={theme.accent}>›</text>
+          <text fg={theme.accent}><strong>›</strong></text>
           <TextField value={query} onChange={(v) => { latestQuery.current = v; setQuery(v); setIndex(0); }} focused placeholder="type a command or secret name" />
         </box>
         <box flexDirection="column" marginTop={1}>
@@ -58,7 +58,7 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
             const on = offset + i === current;
             const hint = command.hint ?? "";
             const label = `${command.group} · `;
-            const title = truncate(command.title, Math.max(4, inner - label.length - hint.length - 2));
+            const title = truncate(command.title, Math.max(4, inner - label.length - hint.length - 5));
             return (
               <box
                 key={command.id}
@@ -69,13 +69,13 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
                 onMouseDown={(event) => { event.preventDefault(); run(command); }}
                 onMouseOver={() => setIndex(offset + i)}
               >
-                <text fg={on ? "#FFFFFF" : theme.text}><span fg={theme.dim}>{label}</span>{title}</text>
-                <text fg={theme.muted}>{hint}</text>
+                <text><span> </span><span fg={theme.dim}>{label}</span>{on ? <strong fg={theme.accent}>{title}</strong> : <span fg={theme.text}>{title}</span>}</text>
+                {hint ? <text flexShrink={0}><span bg={theme.chip} fg={on ? theme.accent : theme.muted}> {hint} </span></text> : null}
               </box>
             );
           })}
         </box>
-        <text fg={theme.dim} marginTop={1}>↑↓ move · enter run · esc close</text>
+        <text marginTop={1}><Chip label="↑↓" /><span fg={theme.muted}> move  </span><Chip label="enter" /><span fg={theme.muted}> run  </span><Chip label="esc" /><span fg={theme.muted}> close</span></text>
       </box>
     </box>
   );

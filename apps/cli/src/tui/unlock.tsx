@@ -7,7 +7,7 @@ import { VaultService } from "../../../../packages/core/src/index.ts";
 import type { UnlockCredentials, VaultSession } from "../../../../packages/core/src/index.ts";
 import { hasPinSet, loadVaultPassword, verifyPin } from "../../../../packages/core/src/os-secrets.ts";
 import { runPasskeyCeremony, type CeremonyRequest, type CeremonyResult } from "../passkey.ts";
-import { Centered, SecretInput, useNow, type KeyHint } from "./components.tsx";
+import { Centered, Chip, SecretInput, useNow, type KeyHint } from "./components.tsx";
 import { useApp, useScreenContext } from "./context.tsx";
 import { theme } from "./theme.ts";
 
@@ -222,9 +222,16 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice, passkeyRun
 
   return (
     <Centered>
-      <box flexDirection="column" border borderStyle="rounded" borderColor={theme.border} paddingX={2} paddingY={1} width={56} gap={1} title=" autho " titleAlignment="center">
-        <text fg={theme.muted}>{step === "pin" ? "Quick unlock with your PIN" : step === "totp" ? "Two-factor code" : step === "passkey" ? "Passkey or security key" : "Unlock your vault"}</text>
-        {error ? <text fg={theme.danger}>{error}</text> : null}
+      <box flexDirection="column" border borderStyle="rounded" borderColor={step === "passkey" ? theme.accent : theme.border} paddingX={2} paddingY={1} width={56} gap={1}>
+        <box flexDirection="column" alignItems="center">
+          <ascii-font text="autho" font="tiny" color={theme.accent} />
+          <text fg={theme.muted}>{step === "pin" ? "Quick unlock with your PIN" : step === "totp" ? "Two-factor code" : step === "passkey" ? "Passkey or security key" : "Unlock your vault"}</text>
+        </box>
+        {error ? (
+          <box backgroundColor={theme.dangerBg} paddingX={1}>
+            <text fg={theme.danger}>✗ {error}</text>
+          </box>
+        ) : null}
         {step === "loading" || step === "unlocking" ? (
           <text fg={theme.accent}>{step === "loading" ? "Checking unlock options…" : "Unlocking…"}</text>
         ) : null}
@@ -264,7 +271,7 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice, passkeyRun
             <text fg={remaining <= 5 ? theme.danger : theme.dim}>{remaining}s</text>
           </box>
         ) : null}
-        {canUsePasskey ? <text fg={theme.dim}>ctrl+p · unlock with a passkey or security key</text> : null}
+        {canUsePasskey ? <text><Chip label="ctrl+p" /><span fg={theme.muted}> unlock with a passkey or security key</span></text> : null}
       </box>
     </Centered>
   );

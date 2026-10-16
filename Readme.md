@@ -143,6 +143,7 @@ Run `autho` with no arguments to open the TUI.
 - Drag with the mouse to select any text, including a revealed value, then press `ctrl+c` to copy it.
 - Copying works without extra setup on Windows (`clip`/PowerShell), macOS (`pbcopy`), Wayland (`wl-copy`) and X11 (`xclip`/`xsel`), and falls back to OSC 52 over SSH.
 - Password inputs are always masked; `ctrl+r` shows what you typed.
+- When editing a secret, `ctrl+r` loads the stored value so you can see and change it; leaving the field empty keeps it.
 
 Environment overrides (seconds):
 

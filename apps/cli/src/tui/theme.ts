@@ -6,13 +6,20 @@ export const theme = {
   border: "#333333",
   borderFocus: "#FFD700",
   text: "#EEEEEE",
-  muted: "#888888",
-  dim: "#555555",
+  muted: "#AAAAAA",
+  dim: "#777777",
   success: "#33CC77",
   danger: "#FF5555",
   info: "#55BBFF",
   revealed: "#7CFC00",
-  selection: "#264F78",
+  /** Selected rows: a dark lift with gold text. */
+  selection: "#222222",
+  /** Text drawn on top of accent/success/danger fills. */
+  onAccent: "#000000",
+  chip: "#262626",
+  input: "#111111",
+  inputFocus: "#1a1a1a",
+  dangerBg: "#331111",
 } as const;
 
 /** Fixed-width mask so the UI never leaks a stored secret's length. */

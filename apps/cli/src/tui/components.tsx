@@ -1,5 +1,5 @@
 import { decodePasteBytes } from "@opentui/core";
-import { useKeyboard, usePaste } from "@opentui/react";
+import { useKeyboard, usePaste, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import type { Toast } from "./context.tsx";
@@ -8,39 +8,60 @@ import { cleanPaste, isEnter, typedText } from "./util.ts";
 
 export function Header({ title, right }: { title: string; right?: ReactNode }) {
   return (
-    <box width="100%" height={1} flexDirection="row" backgroundColor={theme.panel} paddingX={1} justifyContent="space-between">
-      <text fg={theme.accent}><strong>autho</strong><span fg={theme.dim}>  ›  </span><span fg={theme.text}>{title}</span></text>
+    <box width="100%" height={2} flexDirection="row" paddingX={1} justifyContent="space-between" border={["bottom"]} borderColor={theme.border}>
+      <text><span bg={theme.accent} fg={theme.onAccent}><strong> autho </strong></span><span fg={theme.dim}>  </span><strong fg={theme.text}>{title}</strong></text>
       {right ?? null}
     </box>
   );
+}
+
+/** A key shown as a small raised chip, e.g. in hints and buttons. */
+export function Chip({ label, color = theme.accent }: { label: string; color?: string }) {
+  return <span bg={theme.chip} fg={color}> {label} </span>;
 }
 
 export type KeyHint = [key: string, label: string];
 
 /** Bottom bar: shows the latest toast, otherwise the key hints for the screen. */
 export function StatusBar({ hints, toast }: { hints: KeyHint[]; toast: Toast | null }) {
+  const { width } = useTerminalDimensions();
   if (toast) {
     const color = toast.kind === "error" ? theme.danger : toast.kind === "info" ? theme.info : theme.success;
     const icon = toast.kind === "error" ? "✗" : toast.kind === "info" ? "›" : "✓";
     return (
-      <box width="100%" height={1} backgroundColor={theme.panel} paddingX={1}>
-        <text fg={color}>{icon} {toast.message}</text>
+      <box width="100%" height={1} backgroundColor={color} paddingX={1}>
+        <text fg={theme.onAccent}><strong>{icon} {toast.message}</strong></text>
       </box>
     );
   }
   return (
-    <box width="100%" height={1} backgroundColor={theme.panel} paddingX={1} flexDirection="row" gap={2}>
-      {hints.map(([key, label]) => (
-        <text key={`${key}-${label}`}><span fg={theme.accent}>{key}</span><span fg={theme.muted}> {label}</span></text>
+    <box width="100%" height={1} backgroundColor={theme.panel} paddingX={1} flexDirection="row" gap={2} overflow="hidden">
+      {fitHints(hints, width - 2).map(([key, label]) => (
+        <text key={`${key}-${label}`} flexShrink={0}><Chip label={key} /><span fg={theme.muted}> {label}</span></text>
       ))}
     </box>
   );
 }
 
-export function Button({ label, onPress, color = theme.accent }: { label: string; onPress: () => void; color?: string }) {
+/** Clickable action; `hotkey` renders as a coloured key cap in front of the label. */
+/** Drops trailing hints that would not fit, instead of cutting one in half. */
+function fitHints(hints: KeyHint[], width: number): KeyHint[] {
+  const shown: KeyHint[] = [];
+  let used = 0;
+  for (const hint of hints) {
+    // " key " chip + " label" + gap of 2.
+    const size = hint[0].length + 2 + 1 + hint[1].length + (shown.length ? 2 : 0);
+    if (used + size > width) break;
+    shown.push(hint);
+    used += size;
+  }
+  return shown;
+}
+
+export function Button({ label, hotkey, onPress, color = theme.accent }: { label: string; hotkey?: string; onPress: () => void; color?: string }) {
   return (
-    <box onMouseDown={(event) => { event.preventDefault(); onPress(); }} paddingX={1} backgroundColor={theme.panelAlt} height={1}>
-      <text fg={color}>{label}</text>
+    <box onMouseDown={(event) => { event.preventDefault(); onPress(); }} height={1} flexShrink={0}>
+      <text>{hotkey ? <span bg={color} fg={theme.onAccent}><strong> {hotkey} </strong></span> : null}<span fg={color}> {label} </span></text>
     </box>
   );
 }
@@ -70,7 +91,7 @@ export function FieldRow({ label, value, color = theme.text, actions }: {
  * Windows Terminal), and Ctrl+R toggles visibility while typing. The value
  * is tracked in a ref so fast typing between renders never drops keys.
  */
-export function SecretInput({ value, onChange, onSubmit, focused, placeholder = "", multiline = false, maxLength }: {
+export function SecretInput({ value, onChange, onSubmit, focused, placeholder = "", multiline = false, maxLength, visible: shownProp, onToggleVisible }: {
   value: string;
   onChange: (value: string) => void;
   onSubmit?: (value: string) => void;
@@ -78,8 +99,13 @@ export function SecretInput({ value, onChange, onSubmit, focused, placeholder = 
   placeholder?: string;
   multiline?: boolean;
   maxLength?: number;
+  /** Controlled visibility; when omitted the input tracks it itself. */
+  visible?: boolean;
+  onToggleVisible?: () => void;
 }) {
-  const [visible, setVisible] = useState(false);
+  const [ownVisible, setOwnVisible] = useState(false);
+  const visible = shownProp ?? ownVisible;
+  const toggleVisible = onToggleVisible ?? (() => setOwnVisible((v) => !v));
   const current = useRef(value);
   const emitted = useRef(value);
   if (value !== emitted.current) {
@@ -100,7 +126,7 @@ export function SecretInput({ value, onChange, onSubmit, focused, placeholder = 
     }
     if (key.ctrl && key.name === "r") {
       key.preventDefault();
-      setVisible((v) => !v);
+      toggleVisible();
       return;
     }
     if (key.ctrl && key.name === "u") {
@@ -136,13 +162,12 @@ export function SecretInput({ value, onChange, onSubmit, focused, placeholder = 
   const length = [...value].length;
   const shown = visible ? value.replace(/\n/g, "⏎") : "•".repeat(length);
   return (
-    <box flexDirection="row" height={1} flexGrow={1} backgroundColor={focused ? theme.panelAlt : theme.panel} paddingX={1}>
+    <box flexDirection="row" height={1} flexGrow={1} flexShrink={1} minWidth={0} backgroundColor={focused ? theme.inputFocus : theme.input} paddingX={1}>
       <box flexGrow={1} flexShrink={1} overflow="hidden">
         {length === 0 && !focused
           ? <text fg={theme.dim}>{placeholder}</text>
           : <text fg={visible ? theme.revealed : theme.accent}>{shown}{focused ? <span fg={theme.accent}>▏</span> : ""}{length === 0 ? <span fg={theme.dim}>{placeholder}</span> : ""}</text>}
       </box>
-      {focused ? <text fg={theme.dim} flexShrink={0}>{visible ? " ctrl+r hide" : " ctrl+r show"}</text> : null}
     </box>
   );
 }
@@ -163,8 +188,8 @@ export function TextField({ value, onChange, onSubmit, focused, placeholder = ""
       focused={focused}
       placeholder={placeholder}
       flexGrow={1}
-      backgroundColor={theme.panel}
-      focusedBackgroundColor={theme.panelAlt}
+      backgroundColor={theme.input}
+      focusedBackgroundColor={theme.inputFocus}
       textColor={theme.text}
       placeholderColor={theme.dim}
     />

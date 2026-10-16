@@ -145,6 +145,19 @@ describe("TUI", () => {
     expect(frame).not.toContain(SECRET);
   });
 
+  test("ctrl+r in the editor shows the stored value and saves edits to it", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressKey("e");
+    await frameContaining("leave empty to keep the current value");
+    t!.mockInput.pressKey("r", { ctrl: true });
+    expect(await frameContaining(SECRET)).toContain(SECRET);
+    t!.mockInput.pressKey("!");
+    await settle();
+    t!.mockInput.pressKey("s", { ctrl: true });
+    await frameContaining("Saved");
+    expect(sink.current!.getSecret("github").value).toBe(`${SECRET}!`);
+  });
+
   test("ctrl+k opens the command palette and runs a command", async () => {
     await renderUnlocked();
     t!.mockInput.pressKey("k", { ctrl: true });

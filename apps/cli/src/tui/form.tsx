@@ -1,5 +1,5 @@
 import { useKeyboard } from "@opentui/react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { SecretRecord, SecretType, VaultSession } from "../../../../packages/core/src/index.ts";
 import { Button, SecretInput, TextField, type KeyHint } from "./components.tsx";
@@ -33,8 +33,9 @@ const LABELS: Record<FieldKey, string> = {
 };
 
 /**
- * Create and edit share one form. In edit mode the stored value is never
- * loaded into the form: leaving the value field empty keeps it unchanged.
+ * Create and edit share one form. In edit mode the stored value is only
+ * loaded when the user asks for it with Ctrl+R; leaving the value field
+ * empty keeps it unchanged.
  */
 export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
   session: VaultSession;
@@ -56,6 +57,9 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
   const fields = useMemo(() => fieldsFor(type).filter((f) => !(editing && f === "type")), [type, editing]);
   const [focus, setFocus] = useState<FieldKey>(editing ? "name" : "type");
   const [error, setError] = useState("");
+  const [showValue, setShowValue] = useState(false);
+  // Stored value, once loaded on request; saving it back unchanged is a no-op.
+  const loadedValue = useRef<string | null>(null);
 
   const set = (key: Exclude<FieldKey, "type">) => (v: string) => setValues((prev) => ({ ...prev, [key]: v }));
 
@@ -70,7 +74,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
       if (editing) {
         const updates: Parameters<VaultSession["updateSecret"]>[1] = {};
         if (name !== editing.name) updates.name = name;
-        if (values.value) updates.value = values.value;
+        if (values.value && values.value !== loadedValue.current) updates.value = values.value;
         if (type !== "note" && values.username !== (editing.username ?? "")) updates.username = values.username;
         const oldUrl = typeof editing.metadata.url === "string" ? editing.metadata.url : "";
         const oldDesc = typeof editing.metadata.description === "string" ? editing.metadata.description : "";
@@ -107,6 +111,22 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
     setType(next);
   };
 
+  // Ctrl+R from any field: show/hide the value, loading the stored one the first time.
+  const toggleValue = () => {
+    setFocus("value");
+    if (!showValue && editing && loadedValue.current === null && !values.value) {
+      try {
+        const current = session.getSecret(editing.id).value;
+        loadedValue.current = current;
+        set("value")(current);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+    }
+    setShowValue((v) => !v);
+  };
+
   const generate = () => {
     if (type !== "password") return;
     set("value")(generatePassword());
@@ -118,6 +138,8 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
     if (key.name === "escape") { key.preventDefault(); onCancel(); return; }
     if (key.ctrl && key.name === "s") { key.preventDefault(); save(); return; }
     if (key.ctrl && key.name === "g") { key.preventDefault(); generate(); return; }
+    // The focused value input handles Ctrl+R itself (via onToggleVisible).
+    if (key.ctrl && key.name === "r" && focus !== "value") { key.preventDefault(); toggleValue(); return; }
     if (key.name === "tab") { key.preventDefault(); moveFocus(key.shift ? -1 : 1); return; }
     if (key.name === "up") { key.preventDefault(); moveFocus(-1); return; }
     if (key.name === "down") { key.preventDefault(); moveFocus(1); return; }
@@ -144,11 +166,11 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
   useEffect(() => {
     const hints: KeyHint[] = [["tab/↑↓", "field"], ["enter", "next"], ["ctrl+s", "save"]];
     if (focus === "type") hints.splice(1, 0, ["←→", "type"]);
-    if (focus === "value") hints.push(["ctrl+r", "show"]);
+    hints.push(["ctrl+r", showValue ? "hide" : "show"]);
     if (type === "password") hints.push(["ctrl+g", "generate"]);
     hints.push(["esc", "cancel"]);
     setHints(hints);
-  }, [focus, type, setHints]);
+  }, [focus, type, showValue, setHints]);
 
   const row = (key: FieldKey, input: ReactNode) => (
     <box key={key} flexDirection="row" gap={1} height={1}>
@@ -160,7 +182,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
   const active = app.active;
   return (
     <box flexDirection="column" flexGrow={1} paddingX={1}>
-      <box flexDirection="column" border borderStyle="rounded" borderColor={theme.border} paddingX={1} paddingY={1} gap={1} title={editing ? ` Edit ${editing.name} ` : " New secret "}>
+      <box flexDirection="column" border borderStyle="rounded" borderColor={theme.border} paddingX={1} paddingY={1} gap={1} title={editing ? ` Edit ${editing.name} ` : " New secret "} titleColor={theme.accent}>
         {fields.map((key) => {
           if (key === "type") {
             return row("type", (
@@ -169,8 +191,8 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
                   const badge = typeBadge(t);
                   const on = t === type;
                   return (
-                    <box key={t} paddingX={1} backgroundColor={on ? theme.selection : theme.panel} onMouseDown={() => { setType(t); setFocus("type"); }}>
-                      <text fg={on ? "#FFFFFF" : theme.muted}><span fg={badge.color}>{badge.glyph}</span> {typeLabel(t)}</text>
+                    <box key={t} paddingX={1} backgroundColor={on ? theme.accent : theme.chip} onMouseDown={() => { setType(t); setFocus("type"); }}>
+                      <text fg={on ? theme.onAccent : theme.muted}><span fg={on ? theme.onAccent : badge.color}>{badge.glyph}</span> {on ? <strong>{typeLabel(t)}</strong> : typeLabel(t)}</text>
                     </box>
                   );
                 })}
@@ -179,16 +201,18 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
           }
           if (key === "value") {
             return row("value", (
-              <box flexDirection="row" flexGrow={1} gap={1} onMouseDown={() => setFocus("value")}>
+              <box flexDirection="row" flexGrow={1} flexShrink={1} minWidth={0} gap={1} onMouseDown={() => setFocus("value")}>
                 <SecretInput
                   value={values.value}
                   onChange={set("value")}
                   onSubmit={submit}
                   focused={active && focus === "value"}
                   multiline={type === "note"}
+                  visible={showValue}
+                  onToggleVisible={toggleValue}
                   placeholder={editing ? "leave empty to keep the current value" : type === "otp" ? "base32 key, e.g. JBSWY3DPEHPK3PXP" : ""}
                 />
-                {type === "password" ? <Button label="generate" onPress={generate} /> : null}
+                {type === "password" ? <Button hotkey="ctrl+g" label="generate" onPress={generate} color={theme.info} /> : null}
               </box>
             ));
           }
@@ -204,10 +228,14 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
             </box>
           ));
         })}
-        {error ? <text fg={theme.danger}>{error}</text> : null}
+        {error ? (
+          <box backgroundColor={theme.dangerBg} paddingX={1}>
+            <text fg={theme.danger}>✗ {error}</text>
+          </box>
+        ) : null}
         <box flexDirection="row" gap={2}>
-          <Button label={editing ? "save · ctrl+s" : "create · ctrl+s"} onPress={save} color={theme.success} />
-          <Button label="cancel · esc" onPress={onCancel} color={theme.muted} />
+          <Button hotkey="ctrl+s" label={editing ? "save" : "create"} onPress={save} color={theme.success} />
+          <Button hotkey="esc" label="cancel" onPress={onCancel} color={theme.muted} />
         </box>
       </box>
     </box>

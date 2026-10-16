@@ -197,7 +197,9 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
       case "down": case "j": move(1); return;
       case "pageup": move(-listHeight); return;
       case "pagedown": move(listHeight); return;
-      case "home": case "g": move(-filtered.length); return;
+      // Terminals report Shift+G as name "g" with shift set.
+      case "g": move(key.shift ? filtered.length : -filtered.length); return;
+      case "home": move(-filtered.length); return;
       case "end": move(filtered.length); return;
       case "/": key.preventDefault(); setSearchFocused(true); return;
       case "n": onCreate(); return;
@@ -205,7 +207,6 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
       case "?": app.openPalette(); return;
       case "r": reload(); app.toast("Reloaded", "info"); return;
     }
-    if (key.sequence === "G") { move(filtered.length); return; }
     if (!selected) return;
 
     if (isEnter(key)) {
@@ -292,8 +293,9 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
       flexShrink={0}
       border
       borderStyle="rounded"
-      borderColor={showDetail && !wide ? theme.border : theme.borderFocus}
+      borderColor={theme.border}
       title={` ${filtered.length}/${entries.length} secrets `}
+      titleColor={theme.muted}
       onMouseScroll={(event) => move(event.scroll?.direction === "up" ? -3 : 3)}
     >
       {filtered.length === 0 ? (
@@ -317,7 +319,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
           >
             <text>
               <span fg={badge.color}>{badge.glyph} </span>
-              <span fg={isSelected ? "#FFFFFF" : theme.text}>{name}</span>
+              {isSelected ? <strong fg={theme.accent}>{name}</strong> : <span fg={theme.text}>{name}</span>}
               <span fg={theme.dim}>{sub ? `  ${truncate(sub, Math.max(0, room - name.length - 2))}` : ""}</span>
             </text>
           </box>
@@ -334,10 +336,10 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
       now={now}
       confirmDelete={confirmDelete}
       onCopy={() => copyPrimary(selected)}
-      onCopyUser={() => copyUsername(selected)}
-      onCopyUrl={() => copyUrl(selected)}
-      onReveal={() => toggleReveal(selected)}
       onOtp={() => copyPrimary(selected)}
+      onOpen={() => open(selected)}
+      onEdit={() => onEdit(selected.id)}
+      onDelete={() => setConfirmDelete(true)}
     />
   ) : (
     <box flexGrow={1} border borderStyle="rounded" borderColor={theme.border} padding={1}>
@@ -347,8 +349,8 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
 
   return (
     <box flexDirection="column" flexGrow={1} width="100%">
-      <box flexDirection="row" paddingX={1} height={1} gap={1}>
-        <text fg={searchFocused ? theme.accent : theme.dim}>/</text>
+      <box flexDirection="row" paddingX={1} height={1}>
+        <text bg={searchFocused ? theme.accent : theme.chip} fg={searchFocused ? theme.onAccent : theme.muted}> / </text>
         <TextField value={query} onChange={setQuery} focused={searchFocused && app.active} placeholder="search by name, username, url…" />
       </box>
       <box flexDirection="row" flexGrow={1} gap={1}>
@@ -359,25 +361,27 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
   );
 }
 
-function Detail({ entry, revealed, otp, now, confirmDelete, onCopy, onCopyUser, onCopyUrl, onReveal, onOtp }: {
+function Detail({ entry, revealed, otp, now, confirmDelete, onCopy, onOtp, onOpen, onEdit, onDelete }: {
   entry: SecretIndexEntry;
   revealed: Revealed | null;
   otp: Otp | null;
   now: number;
   confirmDelete: boolean;
   onCopy: () => void;
-  onCopyUser: () => void;
-  onCopyUrl: () => void;
-  onReveal: () => void;
   onOtp: () => void;
+  onOpen: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
 }) {
   const badge = typeBadge(entry.type);
   const valueLabel = entry.type === "note" ? "Note" : entry.type === "otp" ? "Secret key" : "Password";
   const revealSeconds = revealed ? Math.max(0, Math.ceil((revealed.until - now) / 1000)) : 0;
   const otpSeconds = otp ? Math.max(0, Math.ceil((otp.expiresAt - now) / 1000)) : 0;
+  const otpBar = 10;
+  const otpFilled = Math.round((otpSeconds / 30) * otpBar);
 
   return (
-    <box flexDirection="column" flexGrow={1} border borderStyle="rounded" borderColor={confirmDelete ? theme.danger : theme.border} paddingX={1} gap={1} title={` ${typeLabel(entry.type)} `}>
+    <box flexDirection="column" flexGrow={1} border borderStyle="rounded" borderColor={confirmDelete ? theme.danger : theme.border} paddingX={1} gap={1} title={` ${typeLabel(entry.type)} `} titleColor={badge.color}>
       <text><span fg={badge.color}>{badge.glyph} </span><strong fg={theme.accent}>{entry.name}</strong></text>
 
       <box flexDirection="column">
@@ -386,42 +390,47 @@ function Detail({ entry, revealed, otp, now, confirmDelete, onCopy, onCopyUser, 
             label="Username"
             value={entry.username ?? "—"}
             color={entry.username ? theme.text : theme.dim}
-            actions={entry.username ? <Button label="copy · u" onPress={onCopyUser} /> : null}
           />
         ) : null}
         <FieldRow
           label={valueLabel}
           value={revealed ? revealed.value : MASK}
-          color={revealed ? theme.revealed : theme.muted}
-          actions={<>
-            <Button label={revealed ? "hide · s" : "reveal · s"} onPress={onReveal} color={theme.info} />
-            {entry.type !== "otp" ? <Button label="copy · c" onPress={onCopy} /> : null}
-          </>}
+          color={revealed ? theme.revealed : theme.dim}
         />
-        {entry.type === "otp" ? (
-          <FieldRow
-            label="Code"
-            value={otp ? `${otp.code.slice(0, 3)} ${otp.code.slice(3)}` : "press o to show"}
-            color={otp ? theme.success : theme.dim}
-            actions={<>
-              {otp ? <text fg={otpSeconds <= 5 ? theme.danger : theme.dim}>{otpSeconds}s</text> : null}
-              <Button label="copy · o" onPress={onOtp} />
-            </>}
-          />
-        ) : null}
-        {entry.url ? <FieldRow label="URL" value={entry.url} color={theme.info} actions={<Button label="copy · w" onPress={onCopyUrl} />} /> : null}
+        {entry.url ? <FieldRow label="URL" value={entry.url} color={theme.info} /> : null}
         {entry.description ? <FieldRow label="Notes" value={entry.description} /> : null}
         <FieldRow label="Updated" value={entry.updatedAt.slice(0, 16).replace("T", " ")} color={theme.dim} />
       </box>
 
+      {entry.type === "otp" ? (
+        <box flexDirection="row" border borderStyle="rounded" borderColor={otp ? theme.success : theme.border} paddingX={1} gap={2} alignSelf="flex-start">
+          {otp ? (
+            <>
+              <text fg={theme.success} selectable><strong>{`${otp.code.slice(0, 3)} ${otp.code.slice(3)}`}</strong></text>
+              <text><span fg={otpSeconds <= 5 ? theme.danger : theme.success}>{"█".repeat(otpFilled)}</span><span fg={theme.chip}>{"█".repeat(otpBar - otpFilled)}</span><span fg={otpSeconds <= 5 ? theme.danger : theme.muted}> {otpSeconds}s</span></text>
+            </>
+          ) : <text fg={theme.dim}>press o to show the code</text>}
+        </box>
+      ) : null}
+
       {revealed ? (
         <text fg={theme.dim}>Visible for {revealSeconds}s — drag to select, ctrl+c to copy the selection.</text>
       ) : null}
+
       {confirmDelete ? (
-        <box border borderStyle="rounded" borderColor={theme.danger} paddingX={1}>
+        <box backgroundColor={theme.dangerBg} paddingX={1}>
           <text fg={theme.danger}><strong>Delete "{entry.name}" permanently?</strong><span fg={theme.muted}>  y = delete · n = cancel</span></text>
         </box>
-      ) : null}
+      ) : (
+        <box flexDirection="row" gap={1} flexWrap="wrap">
+          {entry.type === "otp"
+            ? <Button hotkey="o" label="copy code" onPress={onOtp} color={theme.success} />
+            : <Button hotkey="c" label={`copy ${valueLabel.toLowerCase()}`} onPress={onCopy} color={theme.success} />}
+          {entry.url && entry.type !== "otp" ? <Button hotkey="o" label="open" onPress={onOpen} color={theme.info} /> : null}
+          <Button hotkey="e" label="edit" onPress={onEdit} color={theme.accent} />
+          <Button hotkey="d" label="delete" onPress={onDelete} color={theme.danger} />
+        </box>
+      )}
     </box>
   );
 }
