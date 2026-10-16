@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { resolve } from "node:path";
+import { CLEAR_COMMAND, runDetachedClear } from "./clipboard.ts";
 import { confirm, readLine, readPasswordMasked } from "./password.ts";
 
 import {
@@ -542,6 +543,12 @@ function help(): string {
 }
 
 async function main(): Promise<void> {
+  // Internal: detached helper spawned by the TUI to clear a copied secret after exit.
+  if (process.argv[2] === CLEAR_COMMAND) {
+    await runDetachedClear(process.argv[3]);
+    return;
+  }
+
   const args = parseArgs(process.argv.slice(2));
   const [scope, action, subaction] = args.positionals;
   const jsonMode = getBoolean(args, "json");
@@ -555,6 +562,12 @@ async function main(): Promise<void> {
   // Fall back to OS secret store before prompting interactively
   if (!password) {
     password = (await loadVaultPassword(vaultPath)) ?? undefined;
+  }
+
+  // `--help` parses as a flag, which leaves scope empty.
+  if (!scope && (process.argv.includes("--help") || process.argv.includes("-h"))) {
+    console.log(help());
+    return;
   }
 
   if (!scope) {
