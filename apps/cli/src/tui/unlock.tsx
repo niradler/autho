@@ -1,16 +1,22 @@
 import { readFileSync } from "node:fs";
 
 import { useKeyboard } from "@opentui/react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { VaultService } from "../../../../packages/core/src/index.ts";
 import type { UnlockCredentials, VaultSession } from "../../../../packages/core/src/index.ts";
 import { hasPinSet, loadVaultPassword, verifyPin } from "../../../../packages/core/src/os-secrets.ts";
+import { runPasskeyCeremony, type CeremonyRequest, type CeremonyResult } from "../passkey.ts";
 import { Centered, SecretInput, useNow, type KeyHint } from "./components.tsx";
 import { useApp, useScreenContext } from "./context.tsx";
 import { theme } from "./theme.ts";
 
-type Step = "loading" | "password" | "pin" | "totp" | "unlocking";
+type Step = "loading" | "password" | "pin" | "totp" | "passkey" | "unlocking";
+
+export type PasskeyRunner = (
+  request: CeremonyRequest,
+  options: { onUrl: (url: string, opened: boolean) => void; signal: AbortSignal },
+) => Promise<CeremonyResult>;
 
 const MAX_PIN_ATTEMPTS = 5;
 
@@ -26,11 +32,13 @@ export function readRecoveryToken(path: string): string | null {
   return token || null;
 }
 
-export function UnlockScreen({ vaultPath, onUnlock, setHints, notice }: {
+export function UnlockScreen({ vaultPath, onUnlock, setHints, notice, passkeyRunner = runPasskeyCeremony }: {
   vaultPath: string;
   onUnlock: (session: VaultSession) => void;
   setHints: (hints: KeyHint[]) => void;
   notice?: string;
+  /** Injected in tests; real runs open a browser page on localhost. */
+  passkeyRunner?: PasskeyRunner;
 }) {
   const app = useApp();
   const [step, setStep] = useState<Step>("loading");
@@ -42,8 +50,10 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice }: {
   const [storedPassword, setStoredPassword] = useState<string | null>(null);
   const [needs, setNeeds] = useState({ pin: false, totp: false });
   const [pinAttempts, setPinAttempts] = useState(0);
-
-  useScreenContext([], null);
+  const [passkeyUrl, setPasskeyUrl] = useState("");
+  const passkeys = useMemo(() => VaultService.listPasskeys(vaultPath), [vaultPath]);
+  const passkeyAbort = useRef<AbortController | null>(null);
+  const stepBeforePasskey = useRef<Step>("password");
 
   const finish = useCallback((creds: UnlockCredentials) => {
     setStep("unlocking");
@@ -147,8 +157,46 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice }: {
     finish({ password: storedPassword ?? password, totp: code });
   };
 
+  const canUsePasskey = passkeys.length > 0 && (step === "password" || step === "pin" || step === "totp");
+
+  // A passkey stands in for password, PIN and TOTP (it requires user verification).
+  const startPasskey = () => {
+    if (!canUsePasskey) return;
+    stepBeforePasskey.current = step;
+    const controller = new AbortController();
+    passkeyAbort.current = controller;
+    setError("");
+    setPasskeyUrl("");
+    setStep("passkey");
+    passkeyRunner(
+      { mode: "authenticate", credentials: passkeys.map(({ credentialId, prfSalt, transports }) => ({ credentialId, prfSalt, transports })) },
+      { onUrl: (url) => setPasskeyUrl(url), signal: controller.signal },
+    ).then(
+      (result) => {
+        if (controller.signal.aborted) return;
+        passkeyAbort.current = null;
+        finish({ password: "", passkey: { credentialId: result.credentialId, prfOutput: result.prfOutput } });
+      },
+      (e) => {
+        if (passkeyAbort.current === controller) passkeyAbort.current = null;
+        setError(controller.signal.aborted ? "" : e instanceof Error ? e.message : String(e));
+        setStep(stepBeforePasskey.current);
+      },
+    );
+  };
+
+  const cancelPasskey = () => passkeyAbort.current?.abort();
+  useEffect(() => () => passkeyAbort.current?.abort(), []);
+
+  useScreenContext(
+    canUsePasskey ? [{ id: "passkey", title: "Unlock with passkey or security key", hint: "ctrl+p", group: "Unlock", run: startPasskey }] : [],
+    null,
+  );
+
   useKeyboard((key) => {
     if (!app.active) return;
+    if (key.ctrl && key.name === "p" && canUsePasskey) { key.preventDefault(); startPasskey(); return; }
+    if (key.name === "escape" && step === "passkey") { key.preventDefault(); cancelPasskey(); return; }
     // From the keychain shortcut, Tab falls back to typing the master password.
     if (key.name === "tab" && storedPassword && (step === "pin" || step === "totp")) {
       key.preventDefault();
@@ -159,12 +207,14 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice }: {
   });
 
   useEffect(() => {
+    if (step === "passkey") { setHints([["esc", "cancel"], ["ctrl+c ×2", "quit"]]); return; }
     const hints: KeyHint[] = [["enter", "unlock"]];
     if (step === "password" || step === "pin") hints.push(["ctrl+r", "show"]);
     if (storedPassword && (step === "pin" || step === "totp")) hints.push(["tab", "use password"]);
+    if (canUsePasskey) hints.push(["ctrl+p", "passkey"]);
     hints.push(["ctrl+c ×2", "quit"]);
     setHints(hints);
-  }, [step, storedPassword, setHints]);
+  }, [step, storedPassword, canUsePasskey, setHints]);
 
   const now = useNow(1000, step === "totp");
   const remaining = Math.ceil((30_000 - (now % 30_000)) / 1000);
@@ -173,7 +223,7 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice }: {
   return (
     <Centered>
       <box flexDirection="column" border borderStyle="rounded" borderColor={theme.border} paddingX={2} paddingY={1} width={56} gap={1} title=" autho " titleAlignment="center">
-        <text fg={theme.muted}>{step === "pin" ? "Quick unlock with your PIN" : step === "totp" ? "Two-factor code" : "Unlock your vault"}</text>
+        <text fg={theme.muted}>{step === "pin" ? "Quick unlock with your PIN" : step === "totp" ? "Two-factor code" : step === "passkey" ? "Passkey or security key" : "Unlock your vault"}</text>
         {error ? <text fg={theme.danger}>{error}</text> : null}
         {step === "loading" || step === "unlocking" ? (
           <text fg={theme.accent}>{step === "loading" ? "Checking unlock options…" : "Unlocking…"}</text>
@@ -188,6 +238,13 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice }: {
           <box flexDirection="row" gap={1}>
             <text fg={theme.muted} width={10}>PIN</text>
             <SecretInput value={pin} onChange={setPin} onSubmit={submitPin} focused={focused} placeholder="PIN" />
+          </box>
+        ) : null}
+        {step === "passkey" ? (
+          <box flexDirection="column" gap={1}>
+            <text fg={theme.accent}>Waiting for your browser — confirm with your passkey or touch your key.</text>
+            {passkeyUrl ? <text fg={theme.dim}>If no browser opened, visit:</text> : null}
+            {passkeyUrl ? <text fg={theme.text}>{passkeyUrl}</text> : null}
           </box>
         ) : null}
         {step === "totp" ? (
@@ -207,6 +264,7 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice }: {
             <text fg={remaining <= 5 ? theme.danger : theme.dim}>{remaining}s</text>
           </box>
         ) : null}
+        {canUsePasskey ? <text fg={theme.dim}>ctrl+p · unlock with a passkey or security key</text> : null}
       </box>
     </Centered>
   );

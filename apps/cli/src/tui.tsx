@@ -12,7 +12,7 @@ import { AppContext, describeCopy, type AppApi, type Command, type CopyTarget, t
 import { SecretForm } from "./tui/form.tsx";
 import { CommandPalette } from "./tui/palette.tsx";
 import { TIMINGS, envMs, theme } from "./tui/theme.ts";
-import { UnlockScreen } from "./tui/unlock.tsx";
+import { UnlockScreen, type PasskeyRunner } from "./tui/unlock.tsx";
 import { VaultScreen } from "./tui/vault.tsx";
 
 type Route =
@@ -30,9 +30,11 @@ export type TuiOptions = {
   onQuit: () => void;
   /** Mirrors the open session so shutdown can close it on any exit path. */
   sessionSink?: { current: VaultSession | null };
+  /** Test seam for the browser passkey ceremony. */
+  passkeyRunner?: PasskeyRunner;
 };
 
-export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLockMs, onQuit, sessionSink }: TuiOptions) {
+export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLockMs, onQuit, sessionSink, passkeyRunner }: TuiOptions) {
   const renderer = useRenderer();
   const [route, setRoute] = useState<Route>({ name: "unlock" });
   const [session, setSession] = useState<VaultSession | null>(null);
@@ -193,7 +195,7 @@ export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLock
 
   let screen;
   if (route.name === "unlock" || !session) {
-    screen = <UnlockScreen key={`unlock:${route.name === "unlock" ? route.notice ?? "" : ""}`} vaultPath={vaultPath} onUnlock={onUnlock} setHints={setHints} notice={route.name === "unlock" ? route.notice : undefined} />;
+    screen = <UnlockScreen key={`unlock:${route.name === "unlock" ? route.notice ?? "" : ""}`} vaultPath={vaultPath} onUnlock={onUnlock} setHints={setHints} notice={route.name === "unlock" ? route.notice : undefined} passkeyRunner={passkeyRunner} />;
   } else if (route.name === "form") {
     screen = (
       <SecretForm

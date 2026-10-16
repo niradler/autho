@@ -11,7 +11,8 @@ bun install -g autho
 ## What Ships In This Release
 
 - Password, note, and OTP secrets (configurable algorithm and digits)
-- Interactive prompt workflow via `autho` with no arguments
+- Terminal UI via `autho` with no arguments: search, reveal, copy, mouse selection, command palette (Linux, macOS, Windows)
+- Passkey and hardware security key unlock (WebAuthn PRF / FIDO2 hmac-secret)
 - Secret CRUD from the Bun CLI
 - OTP code generation (RFC 6238 TOTP)
 - File encryption and decryption (with `--force` overwrite guard)
@@ -37,6 +38,8 @@ bun install -g autho
 - Local daemon auth tokens use OS secret storage when available (falls back to file)
 - Master password can be saved to OS secret store via setup wizard (`autho init`) — no repeated prompts
 - PIN is a local machine gate stored in the OS keychain — it does not travel with the vault file and provides no cryptographic protection of vault data
+- Passkeys and security keys wrap the root key with a key derived (HKDF-SHA256) from the authenticator's PRF output; the PRF value is never stored, and user verification (biometric or PIN) is required
+- Copied secrets are cleared from the clipboard after 30 seconds, only if the clipboard still holds them — also after the TUI exits
 - Audit events record access patterns without storing secret values
 - Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
 
@@ -117,6 +120,55 @@ Start the local web UI:
 bun run web
 ```
 
+## Terminal UI
+
+Run `autho` with no arguments to open the TUI.
+
+| Key | Action |
+| --- | --- |
+| `/` | Search secrets |
+| `↑↓` `j/k` `PgUp/PgDn` `g/G` | Move |
+| `enter` | Open the selected secret; in the detail view, copy its value |
+| `s` / `space` | Reveal or hide the value |
+| `c` | Copy the password, note or current OTP code |
+| `u` | Copy the username |
+| `w` / `o` | Copy / open the URL |
+| `n` / `e` / `d` | New / edit / delete |
+| `q` | Quit |
+| `ctrl+k` / `?` | Command palette: every action on the current screen, plus jump to any secret |
+| `ctrl+l` | Lock now |
+| `ctrl+c` | Copy the mouse selection or focused value; press again to quit |
+| `ctrl+p` | (unlock screen) Unlock with a passkey or security key |
+
+- Drag with the mouse to select any text, including a revealed value, then press `ctrl+c` to copy it.
+- Copying works without extra setup on Windows (`clip`/PowerShell), macOS (`pbcopy`), Wayland (`wl-copy`) and X11 (`xclip`/`xsel`), and falls back to OSC 52 over SSH.
+- Password inputs are always masked; `ctrl+r` shows what you typed.
+
+Environment overrides (seconds):
+
+- `AUTHO_TUI_REVEAL_SECONDS` — how long a revealed value stays visible (default 30)
+- `AUTHO_CLIPBOARD_CLEAR_SECONDS` — when copied secrets are cleared (default 30, `0` keeps them)
+- `AUTHO_TUI_LOCK_SECONDS` — idle auto-lock (default 300, `0` disables it)
+
+## Passkeys And Security Keys
+
+Unlock with Touch ID, Windows Hello, a phone passkey, or a FIDO2 key such as a YubiKey:
+
+```bash
+autho passkey add --label yubikey     # opens a one-time page on http://localhost
+autho secrets list --passkey          # any command: unlock with the passkey
+autho passkey list
+autho passkey remove yubikey
+```
+
+How it works: WebAuthn runs on a single-use localhost page (random token, Host/Origin checks, strict CSP). The authenticator's PRF extension (hmac-secret) returns a 32-byte value that only it can produce. Autho derives a key from it and wraps the vault root key, the same way the recovery token does. Your master password keeps working.
+
+Notes:
+
+- A passkey unlock replaces the password, PIN and TOTP prompts, because the authenticator already required a biometric or PIN.
+- PRF support is needed: recent Chrome or Edge (Windows Hello included), Safari 18+ on macOS, and most FIDO2 security keys. Unsupported setups get a clear error, and nothing is saved.
+- Credentials are bound to `localhost` and to this vault; a passkey must be added on each vault separately.
+
 ## Build And Release
 
 Build Bun bundles:
@@ -176,6 +228,8 @@ The Bun end-to-end suite covers the main user flows from real process boundaries
 - file and folder crypto
 - daemon-backed unlock and exec
 - local web unlock and secret APIs
+
+Unit and UI tests cover the TUI (masking, reveal, copy, ctrl+c, mouse selection, palette, passkey unlock), clipboard backends, passkey key wrapping, and the passkey ceremony server.
 
 Run it with:
 

@@ -2,6 +2,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHmac,
+  hkdfSync,
   randomBytes,
   scryptSync,
 } from "node:crypto";
@@ -56,6 +57,17 @@ export function deriveKeyFromPassword(
     p: config.p,
     r: config.r,
   });
+}
+
+/**
+ * HKDF-SHA256 for inputs that are already high-entropy keys, such as a
+ * WebAuthn PRF output. Never use this for passwords: they need scrypt.
+ */
+export function deriveKeyFromSecret(secret: Buffer, salt: Buffer, info: string, length = 32): Buffer {
+  if (secret.length < 32) {
+    throw new Error("Key material must be at least 32 bytes");
+  }
+  return Buffer.from(hkdfSync("sha256", secret, salt, Buffer.from(info, "utf8"), length));
 }
 
 export function encryptWithKey(

@@ -10,6 +10,7 @@ import {
   createVaultConfig,
   decryptWithKey,
   deriveKeyFromPassword,
+  deriveKeyFromSecret,
   encryptWithKey,
   generateTotpSecret,
   randomId,
@@ -31,7 +32,7 @@ import {
   encryptFileArtifact,
   encryptFolderArtifact,
 } from "./artifacts.ts";
-import { AuthoDatabase, type AuditRow, type LeaseRow, type SecretRow, type VaultAuth } from "../../storage/src/index.ts";
+import { AuthoDatabase, type AuditRow, type LeaseRow, type SecretRow, type VaultAuth, type VaultPasskey } from "../../storage/src/index.ts";
 import {
   defaultProjectFilePath,
   defaultVaultPath,
@@ -44,7 +45,31 @@ export type UnlockCredentials = {
   password: string;
   totp?: string;
   recovery?: string;
+  /** WebAuthn PRF result from a registered passkey or security key (both base64url). */
+  passkey?: { credentialId: string; prfOutput: string };
 };
+
+/** Public passkey details: safe to show before unlocking. */
+export type PasskeyInfo = Omit<VaultPasskey, "wrappedRootKey">;
+
+const PASSKEY_INFO = "autho:vault-passkey";
+
+function passkeyAad(id: string): string {
+  return `${PASSKEY_INFO}:${id}`;
+}
+
+function passkeyKek(id: string, prfOutput: Buffer): Buffer {
+  // The salt binds the KEK to this registration; the PRF output is the real key material.
+  return deriveKeyFromSecret(prfOutput, Buffer.from(passkeyAad(id), "utf8"), PASSKEY_INFO);
+}
+
+function decodePrfOutput(value: string): Buffer {
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.length !== 32) {
+    throw new Error("Passkey PRF output must be 32 bytes");
+  }
+  return bytes;
+}
 
 export type SecretRecord = {
   createdAt: string;
@@ -470,6 +495,33 @@ export class VaultService {
       }
     }
 
+    // Passkey path: the authenticator's PRF output is the key material, and
+    // WebAuthn already required user verification (PIN or biometric) on it.
+    if (creds.passkey) {
+      const passkey = vaultAuth?.passkeys?.find((p) => p.credentialId === creds.passkey!.credentialId);
+      if (!passkey) {
+        db.close();
+        throw new Error("This passkey is not registered for this vault");
+      }
+      try {
+        const kek = passkeyKek(passkey.id, decodePrfOutput(creds.passkey.prfOutput));
+        const rootKey = decryptWithKey(passkey.wrappedRootKey, kek, passkeyAad(passkey.id));
+        db.insertAudit({
+          createdAt: new Date().toISOString(),
+          eventType: "auth.unlock.passkey",
+          id: randomId(),
+          message: "Vault unlocked with a passkey",
+          metadata: JSON.stringify({ label: passkey.label, passkeyId: passkey.id }),
+          subjectRef: passkey.id,
+          subjectType: "vault",
+        });
+        return new VaultSession(db, rootKey);
+      } catch (error) {
+        db.close();
+        throw new Error("Passkey did not unlock the vault", { cause: error });
+      }
+    }
+
     // Password path
     try {
       // Derive password KEK once — reused for both TOTP decryption and root key unwrapping
@@ -637,6 +689,96 @@ export class VaultService {
       });
 
       return { fileContent };
+    } finally {
+      db.close();
+    }
+  }
+
+  static listPasskeys(vaultPath: string): PasskeyInfo[] {
+    return (VaultService.getAuthConfig(vaultPath)?.passkeys ?? []).map(({ wrappedRootKey: _key, ...info }) => info);
+  }
+
+  /**
+   * Registers a passkey: the root key is wrapped with a key derived from the
+   * authenticator's PRF output. Requires normal unlock credentials first.
+   */
+  static addPasskey(
+    vaultPath: string,
+    credentials: UnlockCredentials,
+    input: { credentialId: string; label: string; prfSalt: string; prfOutput: string; transports?: string[] },
+  ): PasskeyInfo {
+    const prfOutput = decodePrfOutput(input.prfOutput);
+    if (Buffer.from(input.prfSalt, "base64url").length < 16) {
+      throw new Error("Passkey PRF salt must be at least 16 bytes");
+    }
+    const session = VaultService.unlock(vaultPath, credentials);
+    const rootKey = session.getRootKey();
+    session.close();
+
+    const db = new AuthoDatabase(vaultPath);
+    try {
+      const existing = db.getVaultAuth();
+      const passkeys = existing?.passkeys ?? [];
+      if (passkeys.some((p) => p.credentialId === input.credentialId)) {
+        throw new Error("This passkey is already registered");
+      }
+      const id = randomId(8);
+      const label = input.label.trim() || `Passkey ${passkeys.length + 1}`;
+      const draft: VaultPasskey = {
+        createdAt: new Date().toISOString(),
+        credentialId: input.credentialId,
+        id,
+        label,
+        prfSalt: input.prfSalt,
+        transports: input.transports?.length ? input.transports : undefined,
+        wrappedRootKey: encryptWithKey(rootKey, passkeyKek(id, prfOutput), passkeyAad(id)),
+      };
+      db.setVaultAuth({ version: 1, ...existing, passkeys: [...passkeys, draft] });
+      db.insertAudit({
+        createdAt: new Date().toISOString(),
+        eventType: "auth.passkey.added",
+        id: randomId(),
+        message: "Passkey added",
+        metadata: JSON.stringify({ label, passkeyId: id }),
+        subjectRef: id,
+        subjectType: "vault",
+      });
+      const { wrappedRootKey: _key, ...info } = draft;
+      return info;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Removes a passkey by id or label. Requires unlock credentials. */
+  static removePasskey(vaultPath: string, credentials: UnlockCredentials, ref: string): PasskeyInfo {
+    const session = VaultService.unlock(vaultPath, credentials);
+    session.close();
+
+    const db = new AuthoDatabase(vaultPath);
+    try {
+      const existing = db.getVaultAuth();
+      const passkeys = existing?.passkeys ?? [];
+      const matches = passkeys.filter((p) => p.id === ref || p.label === ref);
+      if (matches.length === 0) {
+        throw new Error(`No passkey matches "${ref}"`);
+      }
+      if (matches.length > 1) {
+        throw new Error(`"${ref}" matches several passkeys — use the id from \`autho passkey list\``);
+      }
+      const removed = matches[0]!;
+      db.setVaultAuth({ ...existing!, version: 1, passkeys: passkeys.filter((p) => p !== removed) });
+      db.insertAudit({
+        createdAt: new Date().toISOString(),
+        eventType: "auth.passkey.removed",
+        id: randomId(),
+        message: "Passkey removed",
+        metadata: JSON.stringify({ label: removed.label, passkeyId: removed.id }),
+        subjectRef: removed.id,
+        subjectType: "vault",
+      });
+      const { wrappedRootKey: _key, ...info } = removed;
+      return info;
     } finally {
       db.close();
     }

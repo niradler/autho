@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { VaultService, type VaultSession } from "../../packages/core/src/index.ts";
 import { Clipboard, type CommandRunner } from "../../apps/cli/src/clipboard.ts";
 import { App } from "../../apps/cli/src/tui.tsx";
+import type { PasskeyRunner } from "../../apps/cli/src/tui/unlock.tsx";
 import { render } from "./setup.ts";
 
 const PASSWORD = "correct-horse-battery";
@@ -151,5 +153,27 @@ describe("TUI", () => {
     await t!.mockInput.typeText("lock vault");
     t!.mockInput.pressEnter();
     await frameContaining("Unlock your vault");
+  });
+
+  test("ctrl+p unlocks with a registered passkey", async () => {
+    const credentialId = randomBytes(16).toString("base64url");
+    const prfOutput = randomBytes(32).toString("base64url");
+    VaultService.addPasskey(vaultPath, { password: PASSWORD }, { credentialId, label: "key", prfOutput, prfSalt: randomBytes(32).toString("base64url") });
+    const requests: unknown[] = [];
+    const runner: PasskeyRunner = async (request, { onUrl }) => {
+      requests.push(request);
+      onUrl("http://localhost:1/token", true);
+      await Bun.sleep(50);
+      return { credentialId, prfOutput };
+    };
+    t = await render(
+      <App vaultPath={vaultPath} clipboard={fakeClipboard()} revealMs={30_000} clipboardClearMs={30_000} idleLockMs={0} onQuit={() => {}} sessionSink={sink} passkeyRunner={runner} />,
+      { width: 120, height: 30, exitOnCtrlC: false },
+    );
+    await frameContaining("ctrl+p");
+    t.mockInput.pressKey("p", { ctrl: true });
+    await frameContaining("Waiting for your browser");
+    await frameContaining("github");
+    expect(requests).toHaveLength(1);
   });
 });

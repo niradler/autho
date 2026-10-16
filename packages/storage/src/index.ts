@@ -17,6 +17,20 @@ export type VaultAuth = {
     kdf: VaultKdfConfig;
     createdAt: string;
   };
+  /** WebAuthn credentials whose PRF output wraps the root key. */
+  passkeys?: VaultPasskey[];
+};
+
+export type VaultPasskey = {
+  id: string;
+  /** base64url credential ID, passed to the browser as allowCredentials. */
+  credentialId: string;
+  label: string;
+  /** base64url PRF input. Not secret: the authenticator's key is what matters. */
+  prfSalt: string;
+  wrappedRootKey: EncryptedBlob;
+  createdAt: string;
+  transports?: string[];
 };
 
 export type SecretRow = {

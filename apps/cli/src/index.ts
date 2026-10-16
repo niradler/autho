@@ -3,8 +3,9 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { CLEAR_COMMAND, runDetachedClear } from "./clipboard.ts";
+import { newPrfSalt, runPasskeyCeremony } from "./passkey.ts";
 import { confirm, readLine, readPasswordMasked } from "./password.ts";
 
 import {
@@ -281,11 +282,41 @@ async function runPromptMode(vaultPath: string, initialPassword?: string): Promi
     prompt.close();
   }
 }
+/** `--passkey` unlocks with a registered passkey or security key instead of the password. */
+function wantsPasskey(args: ParsedArgs): boolean {
+  return args.options.passkey !== undefined;
+}
+
+function printCeremonyUrl(url: string, opened: boolean): void {
+  // stderr keeps --json output on stdout clean.
+  console.error(opened
+    ? `Opened your browser to use a passkey. If nothing appeared, open:\n  ${url}`
+    : `Open this link in a browser on this machine to use a passkey:\n  ${url}`);
+}
+
+async function passkeyCredentials(vaultPath: string): Promise<UnlockCredentials> {
+  const passkeys = VaultService.listPasskeys(vaultPath);
+  if (passkeys.length === 0) {
+    throw new Error("No passkeys are registered for this vault — add one with `autho passkey add`");
+  }
+  const result = await runPasskeyCeremony(
+    { mode: "authenticate", credentials: passkeys.map(({ credentialId, prfSalt, transports }) => ({ credentialId, prfSalt, transports })) },
+    { onUrl: printCeremonyUrl },
+  );
+  return { password: "", passkey: { credentialId: result.credentialId, prfOutput: result.prfOutput } };
+}
+
 async function resolveUnlockCredentials(
   vaultPath: string,
   args: ParsedArgs,
   existingPassword?: string,
 ): Promise<UnlockCredentials> {
+  // A passkey replaces password, PIN and TOTP: the authenticator already
+  // required user verification (biometric or PIN) to release its PRF value.
+  if (wantsPasskey(args)) {
+    return passkeyCredentials(vaultPath);
+  }
+
   // Password: --password > AUTHO_MASTER_PASSWORD > OS keychain > interactive prompt
   let password = existingPassword ?? getString(args, "password") ?? process.env.AUTHO_MASTER_PASSWORD;
   if (!password) {
@@ -508,6 +539,9 @@ function help(): string {
     "  recovery generate --output <path> [--vault <path>] [--json]",
     "  recovery revoke [--vault <path>] [--json]",
     "  unlock --recovery-file <path> [--vault <path>] [--json]",
+    "  passkey add [--label <name>] [--vault <path>] [--json]",
+    "  passkey list [--vault <path>] [--json]",
+    "  passkey remove <id-or-label> [--vault <path>] [--json]",
     "  os-secrets set --name <name> [--value <value>] [--json]",
     "  os-secrets get --name <name> [--json]",
     "  os-secrets delete --name <name> [--json]",
@@ -522,6 +556,11 @@ function help(): string {
     "    AUTHO_PIN=<value>                Environment variable (PIN, if set on this machine)",
     "    AUTHO_TOTP_CODE=<value>          Environment variable (TOTP code, if enabled)",
     "    --password <value>               CLI flag (visible in shell history - avoid!)",
+    "",
+    "  Passkeys and security keys (WebAuthn PRF / hmac-secret):",
+    "    autho passkey add                Register one (opens a browser page on localhost)",
+    "    --passkey                        Unlock any command with it instead of the password",
+    "    In the TUI, press ctrl+p on the unlock screen.",
     "",
     "  Native OS secret store support (via Bun.secrets):",
     "    macOS   → Keychain Services",
@@ -593,7 +632,7 @@ async function main(): Promise<void> {
   }
 
   // Auto-prompt for password when running interactively and no --password/env var
-  if (!password && process.stdin.isTTY) {
+  if (!password && process.stdin.isTTY && !wantsPasskey(args)) {
     const needsPassword = [
       "secrets", "otp", "lease", "env", "exec",
       "file", "files", "audit", "import", "recovery", "unlock",
@@ -861,6 +900,58 @@ async function main(): Promise<void> {
     VaultService.revokeRecovery(vaultPath, creds);
     output({ revoked: true }, jsonMode);
     return;
+  }
+
+  if (scope === "passkey" && (action === "list" || action === undefined)) {
+    const passkeys = VaultService.listPasskeys(vaultPath);
+    if (jsonMode) {
+      output(passkeys.map(({ id, label, createdAt, transports }) => ({ createdAt, id, label, transports: transports ?? [] })), true);
+    } else if (passkeys.length === 0) {
+      console.log("No passkeys registered. Add one with `autho passkey add --label <name>`.");
+    } else {
+      for (const p of passkeys) {
+        const via = p.transports?.length ? `  (${p.transports.join(", ")})` : "";
+        console.log(`${p.id}  ${p.label}  added ${p.createdAt.slice(0, 10)}${via}`);
+      }
+    }
+    return;
+  }
+
+  if (scope === "passkey" && action === "add") {
+    // Prove access first, so a failed browser step doesn't waste a touch.
+    const creds = await resolveUnlockCredentials(vaultPath, args, password);
+    VaultService.unlock(vaultPath, creds).close();
+    const existing = VaultService.listPasskeys(vaultPath);
+    const prfSalt = newPrfSalt();
+    const result = await runPasskeyCeremony(
+      {
+        mode: "register",
+        userName: `autho (${basename(vaultPath)})`,
+        excludeCredentialIds: existing.map((p) => p.credentialId),
+        prfSalt,
+      },
+      { onUrl: printCeremonyUrl },
+    );
+    const label = getString(args, "label") ?? (process.stdin.isTTY && !jsonMode ? (await readLine("Name for this passkey (e.g. YubiKey, MacBook): ")).trim() : "");
+    const info = VaultService.addPasskey(vaultPath, creds, { ...result, label, prfSalt });
+    if (jsonMode) {
+      output({ added: true, id: info.id, label: info.label }, true);
+    } else {
+      console.log(`Added passkey "${info.label}" (${info.id}). Unlock with \`--passkey\` or ctrl+p in the TUI.`);
+    }
+    return;
+  }
+
+  if (scope === "passkey" && (action === "remove" || action === "rm")) {
+    const ref = required(subaction ?? getString(args, "id"), "<id-or-label>");
+    const creds = await resolveUnlockCredentials(vaultPath, args, password);
+    const removed = VaultService.removePasskey(vaultPath, creds, ref);
+    output({ id: removed.id, label: removed.label, removed: true }, jsonMode);
+    return;
+  }
+
+  if (scope === "passkey") {
+    throw new Error(`Unknown passkey action: ${action}. Use add, list or remove.`);
   }
 
   if (scope === "unlock" && getString(args, "recovery-file")) {
