@@ -26,10 +26,29 @@ function walk(root: string): string[] {
   return files;
 }
 
+// Prefer git's tracked files so build output and stale untracked leftovers are
+// never linted (new files are checked once staged). Falls back to a directory
+// walk outside a git checkout.
+function gitFiles(): string[] | null {
+  const result = Bun.spawnSync(
+    ["git", "ls-files", "--cached", "-z", "--", ...sourceRoots],
+    { cwd: repoRoot, stderr: "ignore" },
+  );
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  return result.stdout
+    .toString()
+    .split("\0")
+    .filter(Boolean)
+    .map((file) => join(repoRoot, file))
+    .filter((file) => !file.split(/[\\/]/).some((part) => ignoredDirs.has(part)))
+    .filter((file) => statSync(file, { throwIfNoEntry: false })?.isFile() ?? false);
+}
+
 function sourceFiles(): string[] {
-  return sourceRoots
-    .flatMap((root) => (statSafe(root) ? walk(join(repoRoot, root)) : []))
-    .filter((file) => textExtensions.has(extname(file)) || basename(file) === "package.json");
+  const files = gitFiles() ?? sourceRoots.flatMap((root) => (statSafe(root) ? walk(join(repoRoot, root)) : []));
+  return files.filter((file) => textExtensions.has(extname(file)) || basename(file) === "package.json");
 }
 
 function statSafe(path: string): boolean {

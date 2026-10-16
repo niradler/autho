@@ -50,7 +50,7 @@ jobs:
           cp -r /tmp/package node_modules/${{ matrix.cross_pkg }}
 
       - name: Build binary
-        run: bun build ./apps/cli/src/index.ts --compile --minify --target=${{ matrix.target }} --outfile=dist/${{ matrix.artifact }}
+        run: bun build ./apps/cli/src/index.ts --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --target=${{ matrix.target }} --outfile=dist/${{ matrix.artifact }}
 
       - name: Smoke test (Unix)
         if: runner.os != 'Windows'

@@ -16,7 +16,7 @@
     },
     "apps/cli": {
       "name": "autho",
-      "version": "3.0.0",
+      "version": "3.0.2",
       "bin": {
         "autho": "./dist/autho.js",
       },
@@ -28,11 +28,11 @@
     },
     "apps/daemon": {
       "name": "@autho/daemon",
-      "version": "0.0.0",
+      "version": "3.0.2",
     },
     "apps/web": {
       "name": "@autho/web",
-      "version": "0.0.0",
+      "version": "3.0.2",
     },
     "packages/core": {
       "name": "@autho/core",

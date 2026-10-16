@@ -15,13 +15,18 @@ import { VaultService } from "../../packages/core/src/index.ts";
 
 const repoRoot = join(import.meta.dir, "..", "..");
 const testAuthoHome = mkdtempSync(join(tmpdir(), "autho-home-"));
+// Never inherit AUTHO_* from the developer's shell or an auto-loaded .env:
+// a stray AUTHO_MASTER_PASSWORD silently changes unlock behavior under test.
+const baseEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => !key.startsWith("AUTHO_")),
+);
 
 function runCli(args: string[], env?: Record<string, string>) {
   const result = Bun.spawnSync({
-    cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
+    cmd: ["bun", "--no-env-file", "run", "./apps/cli/src/index.ts", ...args],
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...baseEnv,
       AUTHO_HOME: testAuthoHome,
       AUTHO_DISABLE_OS_SECRETS: "1",
       ...(env ?? {}),
@@ -39,10 +44,10 @@ function runCli(args: string[], env?: Record<string, string>) {
 
 async function runCliInteractive(args: string[], input: string, env?: Record<string, string>) {
   const processRef = Bun.spawn({
-    cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
+    cmd: ["bun", "--no-env-file", "run", "./apps/cli/src/index.ts", ...args],
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...baseEnv,
       AUTHO_HOME: testAuthoHome,
       AUTHO_DISABLE_OS_SECRETS: "1",
       ...(env ?? {}),
@@ -88,10 +93,10 @@ function cookieHeader(setCookie: string | null): string {
 // Runs CLI without disabling OS secrets (needed for PIN tests)
 function runCliOsSecrets(args: string[], env?: Record<string, string>) {
   const result = Bun.spawnSync({
-    cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
+    cmd: ["bun", "--no-env-file", "run", "./apps/cli/src/index.ts", ...args],
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...baseEnv,
       AUTHO_HOME: testAuthoHome,
       ...(env ?? {}),
     },
@@ -635,7 +640,7 @@ describe("autho rewrite CLI", () => {
     runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "memo", "--type", "note", "--value", "ship the rewrite"]);
 
     const daemon = Bun.spawn({
-      cmd: ["bun", "run", "./apps/daemon/src/index.ts", "serve", "--vault", vaultPath, "--state-file", stateFile, "--port", "0"],
+      cmd: ["bun", "--no-env-file", "run", "./apps/daemon/src/index.ts", "serve", "--vault", vaultPath, "--state-file", stateFile, "--port", "0"],
       cwd: repoRoot,
       stderr: "pipe",
       stdout: "pipe",
@@ -698,7 +703,7 @@ describe("autho rewrite CLI", () => {
     runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "github", "--type", "password", "--value", "ghp_example_secret"]);
 
     const web = Bun.spawn({
-      cmd: ["bun", "run", "./apps/web/src/index.ts", "serve", "--vault", vaultPath, "--port", String(port)],
+      cmd: ["bun", "--no-env-file", "run", "./apps/web/src/index.ts", "serve", "--vault", vaultPath, "--port", String(port)],
       cwd: repoRoot,
       stderr: "pipe",
       stdout: "pipe",
