@@ -59,6 +59,13 @@ export type SecretRecord = {
 
 export type SecretSummary = Omit<SecretRecord, "metadata" | "username" | "value">;
 
+/** Searchable, non-secret fields for list views. Never carries the secret value. */
+export type SecretIndexEntry = SecretSummary & {
+  description: string | null;
+  url: string | null;
+  username: string | null;
+};
+
 export type AuditEvent = {
   createdAt: string;
   eventType: string;
@@ -920,6 +927,30 @@ export class VaultSession {
       type: normalizeSecretType(row.type),
       updatedAt: row.updatedAt,
     }));
+  }
+
+  /**
+   * Decrypts every secret but returns only display fields (username, url,
+   * description), so list UIs can search without holding values in memory.
+   * Audited once per call instead of once per secret.
+   */
+  listSecretIndex(): SecretIndexEntry[] {
+    const entries = this.db.listSecrets().map((row) => {
+      const secret = this.unwrapSecret(row);
+      const { url, description } = secret.metadata;
+      return {
+        createdAt: secret.createdAt,
+        description: typeof description === "string" && description ? description : null,
+        id: secret.id,
+        name: secret.name,
+        type: secret.type,
+        updatedAt: secret.updatedAt,
+        url: typeof url === "string" && url ? url : null,
+        username: secret.username,
+      };
+    });
+    this.audit("secret.index", "vault", null, "Secret index listed", { count: entries.length });
+    return entries;
   }
 
   getSecret(ref: string): SecretRecord {
