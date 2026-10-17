@@ -14,3 +14,4 @@ node_modules
 build/
 .claude/docs/
 packages/cli/.autho
+apps/web/src/ui.generated.ts

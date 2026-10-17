@@ -1102,6 +1102,17 @@ function recoveryFileContent(vaultPath: string, token: string): string {
   ].join("\n");
 }
 
+/** Reads the token out of a file made by generateRecovery. Throws on anything else. */
+export function parseRecoveryFile(content: string): string {
+  const lines = content.split(/\r?\n/);
+  const tokenLineIdx = lines.findIndex((l) => l.trim() === "RECOVERY TOKEN:");
+  if (tokenLineIdx === -1) throw new Error("Invalid recovery file format");
+  const rawTokenLine = lines.slice(tokenLineIdx + 1).find((l) => l.trim() !== "") ?? "";
+  const token = rawTokenLine.trim().replace(/-/g, "").toLowerCase();
+  if (!token) throw new Error("Invalid recovery file format: missing token");
+  return token;
+}
+
 export class VaultSession {
   private readonly sealKey: Buffer;
   /** The root key's wrap says this vault is sealed, so a missing seal means tampering. */
@@ -1415,8 +1426,15 @@ export class VaultSession {
     imported: number;
     skipped: number;
   } {
-    const raw = JSON.parse(readFileSync(filePath, "utf8")) as LegacySecret[];
-    return this.sealedWrite(() => this.importLegacyEntries(raw, options));
+    return this.importLegacy(JSON.parse(readFileSync(filePath, "utf8")), options);
+  }
+
+  /** Imports an already-parsed legacy backup (an array of entries), e.g. one uploaded to the web UI. */
+  importLegacy(raw: unknown, options?: { skipExisting?: boolean }): { imported: number; skipped: number } {
+    if (!Array.isArray(raw)) {
+      throw new Error("Legacy backup must be a JSON array of secrets");
+    }
+    return this.sealedWrite(() => this.importLegacyEntries(raw as LegacySecret[], options));
   }
 
   private importLegacyEntries(raw: LegacySecret[], options?: { skipExisting?: boolean }): {
@@ -1691,6 +1709,11 @@ export class VaultSession {
     });
 
     return lease;
+  }
+
+  /** Leases, newest first, including expired and revoked ones. */
+  listLeases(limit = 100): LeaseState[] {
+    return this.db.listLeases(limit).map(parseLease);
   }
 
   /** Works even when the vault seal is broken: taking access away must never be blocked. */

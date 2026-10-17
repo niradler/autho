@@ -10,7 +10,12 @@ Autho stores secrets in an encrypted SQLite vault on your machine. No cloud, no 
 bun install -g autho
 ```
 
-Requires **Bun 1.3.10+**.
+Requires **Bun 1.3.10+**. Standalone binaries for macOS, Linux and Windows are on [GitHub Releases](https://github.com/niradler/autho/releases), and the web UI runs in Docker:
+
+```bash
+docker run --rm -it -v autho-data:/data niradler/autho init
+docker run -d -p 127.0.0.1:8061:8061 -v autho-data:/data niradler/autho
+```
 
 ## Quick Start
 
@@ -44,7 +49,7 @@ You can also set `AUTHO_MASTER_PASSWORD` to avoid passing `--password` on every 
 - **Legacy import** — migrate from JSON backup files
 - **Interactive mode** — run `autho` with no arguments for a guided prompt
 - **Local daemon** — unlock once, run many commands without re-entering your password
-- **Local web UI** — browser-based secret browsing on localhost
+- **Local web UI** — everything the CLI and TUI do, in the browser on localhost (`autho web serve`); it also runs while the TUI is open
 
 ## Commands
 
@@ -68,6 +73,7 @@ autho files decrypt --password <value> --input <path> [--output <path>] [--force
 autho import legacy --password <value> --file <path> [--no-skip-existing] [--json]
 autho audit list --password <value> [--limit <number>] [--json]
 autho project init --map <ENV=ref> [--output <path>] [--force] [--json]
+autho web serve [--vault <path>] [--port <value>]
 autho daemon serve [--vault <path>] [--port <value>]
 autho daemon status [--state-file <path>] [--json]
 autho daemon unlock --password <value> [--ttl <seconds>] [--state-file <path>] [--json]

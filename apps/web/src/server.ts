@@ -1,370 +1,223 @@
-import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 
-import { AuthoDatabase } from "../../../packages/storage/src/index.ts";
-import { VaultService, VaultSession, defaultVaultPath } from "../../../packages/core/src/index.ts";
-import { closeSessionAndRecordSeal, loadSealRecord } from "../../../packages/core/src/os-secrets.ts";
+import { defaultVaultPath, numberPreference } from "../../../packages/core/src/index.ts";
+import { HttpError, matchRoute, type ApiContext } from "./api.ts";
+import {
+  CSRF_HEADER,
+  REQUEST_HEADER,
+  UnlockThrottle,
+  allowedHosts,
+  hostAllowed,
+  isLoopbackHost,
+  newToken,
+  pageCsp,
+  sameOrigin,
+  securityHeaders,
+  withNonce,
+} from "./security.ts";
+import { SessionStore, type WebSession } from "./sessions.ts";
+import { UI_HTML } from "./ui.generated.ts";
 
-type SessionState = {
-  expiresAt: string;
-  rootKey: Buffer;
-  /** The root key's wrap says the vault is sealed. */
-  sealBound: boolean;
+export type WebServerOptions = {
+  host?: string;
+  port?: number;
+  vaultPath?: string;
 };
 
-function json(data: unknown, status = 200, headers?: HeadersInit): Response {
-  return new Response(JSON.stringify(data, null, 2), {
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      ...(headers ?? {}),
-    },
+export type WebServer = {
+  port: number;
+  url: string;
+  stop(): void;
+};
+
+const MAX_BODY = 64 * 1024;
+/** Legacy JSON imports can be large. */
+const MAX_IMPORT_BODY = 8 * 1024 * 1024;
+const SWEEP_MS = 15_000;
+
+function json(data: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(data), {
+    headers: securityHeaders({ "content-type": "application/json; charset=utf-8", ...headers }),
     status,
   });
 }
 
-function html(body: string): Response {
-  return new Response(body, {
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-    },
-  });
-}
-
-function parseCookies(request: Request): Record<string, string> {
-  const cookieHeader = request.headers.get("cookie") ?? "";
-  return Object.fromEntries(
-    cookieHeader
-      .split(";")
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => {
-        const index = part.indexOf("=");
-        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
-      }),
-  );
-}
-
-/** Opens a session per request, with the current keychain seal record so a swapped-in older vault file is caught. */
-async function openSession(vaultPath: string, state: SessionState): Promise<VaultSession> {
-  return new VaultSession(new AuthoDatabase(vaultPath), state.rootKey, {
-    sealBound: state.sealBound,
-    sealRecord: await loadSealRecord(vaultPath),
-  });
-}
-
-function requireSession(request: Request, sessions: Map<string, SessionState>): SessionState & { id: string } {
-  const cookies = parseCookies(request);
-  const sessionId = cookies.autho_session;
-  if (!sessionId) {
-    throw new Error("Missing web session");
+function cookieValue(request: Request, name: string): string | undefined {
+  for (const part of (request.headers.get("cookie") ?? "").split(";")) {
+    const index = part.indexOf("=");
+    if (index > 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
   }
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error("Unknown web session");
+  return undefined;
+}
+
+async function readBody(request: Request, limit: number): Promise<Record<string, unknown>> {
+  if (request.method === "GET" || request.method === "HEAD") return {};
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > limit) throw new HttpError(413, "Request is too large");
+  const text = await request.text();
+  if (text === "") return {};
+  if (!(request.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+    throw new HttpError(415, "Send JSON");
   }
-  if (Date.parse(session.expiresAt) <= Date.now()) {
-    sessions.delete(sessionId);
-    throw new Error("Expired web session");
+  if (Buffer.byteLength(text) > limit) throw new HttpError(413, "Request is too large");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new HttpError(400, "Malformed JSON");
   }
-  return { ...session, id: sessionId };
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new HttpError(400, "Send a JSON object");
+  return parsed as Record<string, unknown>;
 }
 
-async function readJson<T>(request: Request): Promise<T> {
-  return (await request.json()) as T;
+/** Vault errors are plain Errors; map the common ones to a fitting status. */
+function errorStatus(error: unknown): { status: number; message: string } {
+  if (error instanceof HttpError) return { status: error.status, message: error.message };
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof Error && error.name === "VaultTamperedError") return { status: 409, message };
+  if (/not found/i.test(message)) return { status: 404, message };
+  return { status: 400, message };
 }
 
-function page(): string {
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Autho</title>
-  <style>
-    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; }
-    body { margin: 0; background: #f5f1e8; color: #1f2937; }
-    main { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
-    section { background: #fffdf8; border: 1px solid #d6cbb8; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 8px 30px rgba(83,58,18,0.08); }
-    h1 { margin-top: 0; font-size: 2rem; }
-    input, select, button { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #bca889; }
-    button { background: #1f4d3a; color: white; border: none; cursor: pointer; }
-    form { display: flex; gap: 8px; flex-wrap: wrap; }
-    pre { background: #1f2937; color: #f9fafb; padding: 12px; border-radius: 12px; overflow: auto; }
-    ul { padding-left: 18px; }
-  </style>
-</head>
-<body>
-  <main>
-    <section>
-      <h1>Autho Local Web</h1>
-      <p>Local-only Bun web UI for vault unlock and secret browsing.</p>
-      <form id="unlock-form">
-        <input id="password" type="password" placeholder="Master password" required />
-        <input id="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="Authenticator code (if enabled)" />
-        <button type="submit">Unlock</button>
-      </form>
-    </section>
-    <section>
-      <h2>Secrets</h2>
-      <button id="refresh">Refresh</button>
-      <ul id="secret-list"></ul>
-      <pre id="output"></pre>
-    </section>
-    <section id="linked" hidden>
-      <h2>Linked to <span id="linked-name"></span></h2>
-      <ul id="linked-list"></ul>
-      <p id="linked-from"></p>
-      <form id="link-form">
-        <input id="link-ref" placeholder="Secret name or id to link" required />
-        <button type="submit">Link</button>
-      </form>
-    </section>
-  </main>
-  <script>
-    const output = document.getElementById('output');
-    const secretList = document.getElementById('secret-list');
-    async function refresh() {
-      const response = await fetch('/api/secrets');
-      if (!response.ok) {
-        output.textContent = await response.text();
-        return;
-      }
-      const data = await response.json();
-      secretList.innerHTML = '';
-      data.data.forEach((secret) => {
-        const item = document.createElement('li');
-        const open = document.createElement('a');
-        open.href = '#';
-        open.textContent = secret.name + " (" + secret.type + ")" + (secret.linkCount ? " · " + secret.linkCount + " linked" : "");
-        open.addEventListener('click', (event) => { event.preventDefault(); showSecret(secret.id); });
-        item.appendChild(open);
-        secretList.appendChild(item);
-      });
-      output.textContent = JSON.stringify(data, null, 2);
-    }
-    let current = null;
-    async function showSecret(ref) {
-      const response = await fetch('/api/secrets/' + encodeURIComponent(ref));
-      if (!response.ok) {
-        output.textContent = await response.text();
-        return;
-      }
-      const secret = (await response.json()).data;
-      current = secret;
-      const { links, linkedFrom, ...rest } = secret;
-      output.textContent = JSON.stringify(rest, null, 2);
-      document.getElementById('linked').hidden = false;
-      document.getElementById('linked-name').textContent = secret.name;
-      const list = document.getElementById('linked-list');
-      list.innerHTML = '';
-      if (!links.length) {
-        list.innerHTML = '<li>No linked secrets</li>';
-      }
-      links.forEach((linked) => {
-        const item = document.createElement('li');
-        const open = document.createElement('a');
-        open.href = '#';
-        open.textContent = linked.name + " (" + linked.type + ") ";
-        open.addEventListener('click', (event) => { event.preventDefault(); showSecret(linked.id); });
-        const unlink = document.createElement('button');
-        unlink.textContent = 'Unlink';
-        unlink.addEventListener('click', () => changeLink('DELETE', linked.id));
-        item.append(open, unlink);
-        list.appendChild(item);
-      });
-      document.getElementById('linked-from').textContent = linkedFrom.length
-        ? 'Linked from: ' + linkedFrom.map((primary) => primary.name).join(', ')
-        : '';
-    }
-    async function changeLink(method, secret) {
-      const response = await fetch('/api/links', {
-        method,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ primary: current.id, secret })
-      });
-      if (!response.ok) {
-        output.textContent = await response.text();
-        return;
-      }
-      await showSecret(current.id);
-      await refresh();
-    }
-    document.getElementById('link-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const input = document.getElementById('link-ref');
-      await changeLink('POST', input.value);
-      input.value = '';
-    });
-    document.getElementById('unlock-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const response = await fetch('/api/session/unlock', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          password: document.getElementById('password').value,
-          totp: document.getElementById('totp').value || undefined
-        })
-      });
-      output.textContent = await response.text();
-      if (response.ok) {
-        await refresh();
-      }
-    });
-    document.getElementById('refresh').addEventListener('click', refresh);
-  </script>
-</body>
-</html>`;
+/**
+ * Inside a container "localhost" is the container itself, so the image sets
+ * AUTHO_WEB_CONTAINER=1 to allow binding all interfaces there. Requests must
+ * still be addressed to localhost, so the port should only be published on the
+ * host's loopback (`-p 127.0.0.1:8061:8061`).
+ */
+function bindAllowed(host: string): boolean {
+  if (isLoopbackHost(host)) return true;
+  return process.env.AUTHO_WEB_CONTAINER === "1" && (host === "0.0.0.0" || host === "::");
 }
 
-export type WebServerOptions = { host?: string; port?: number; vaultPath?: string };
+/** The port the browser sees when a container publishes ours on another one (`-p 127.0.0.1:9000:8061`). */
+function publicPort(): number | null {
+  const value = Number(process.env.AUTHO_WEB_PUBLIC_PORT);
+  return Number.isInteger(value) && value > 0 && value < 65536 ? value : null;
+}
 
-/** Serves the local web UI until the process exits. */
-export async function startWebServer(options: WebServerOptions = {}): Promise<void> {
+export function createWebServer(options: WebServerOptions = {}): WebServer {
+  const host = options.host ?? "localhost";
+  if (!bindAllowed(host)) {
+    throw new Error(`The web UI only listens on this machine (localhost); refusing --host ${host}`);
+  }
   const vaultPath = resolve(options.vaultPath ?? defaultVaultPath());
-  const host = options.host ?? "127.0.0.1";
-  const port = options.port ?? 8061;
-  const sessions = new Map<string, SessionState>();
+  const requestedPort = options.port ?? numberPreference("webPort");
 
-  const cleanup = () => {
-    for (const [id, session] of sessions.entries()) {
-      if (Date.parse(session.expiresAt) <= Date.now()) {
-        sessions.delete(id);
-      }
-    }
-  };
-
-  const server = Bun.serve({
-    fetch: async (request) => {
-      cleanup();
-      const url = new URL(request.url);
-
-      try {
-        if (request.method === "GET" && url.pathname === "/health") {
-          return json({ ok: true, running: true, vaultPath });
-        }
-
-        if (request.method === "GET" && url.pathname === "/") {
-          return html(page());
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/session/unlock") {
-          const body = await readJson<{ password: string; totp?: string; ttlSeconds?: number }>(request);
-          const ttlSeconds = body.ttlSeconds ?? 3600;
-          if (ttlSeconds <= 0 || ttlSeconds > 86400) {
-            return json({ error: "Session TTL must be between 1 and 86400 seconds" }, 400);
-          }
-          const { rootKey, sealBound } = VaultService.unlockRootKey(vaultPath, {
-            password: body.password,
-            sealRecord: await loadSealRecord(vaultPath),
-            totp: body.totp,
-          });
-          const sessionId = randomBytes(16).toString("hex");
-          const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-          sessions.set(sessionId, { expiresAt, rootKey, sealBound });
-          return json(
-            { expiresAt, sessionId },
-            200,
-            { "set-cookie": `autho_session=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Secure` },
-          );
-        }
-
-        if (request.method === "POST" && url.pathname === "/api/session/lock") {
-          const cookies = parseCookies(request);
-          if (cookies.autho_session) {
-            sessions.delete(cookies.autho_session);
-          }
-          return json({ locked: true }, 200, { "set-cookie": "autho_session=; Max-Age=0; Path=/; Secure" });
-        }
-
-        if (url.pathname.startsWith("/api/")) {
-          const webSession = requireSession(request, sessions);
-          const session = await openSession(vaultPath, webSession);
-          try {
-            if (request.method === "GET" && url.pathname === "/api/status") {
-              return json({
-                initialized: true,
-                secretCount: session.listSecrets().length,
-                unlocked: true,
-                vaultPath,
-              });
-            }
-
-            if (request.method === "GET" && url.pathname === "/api/secrets") {
-              return json({ data: session.listSecretIndex() });
-            }
-
-            if (request.method === "GET" && url.pathname.startsWith("/api/secrets/")) {
-              const ref = decodeURIComponent(url.pathname.slice("/api/secrets/".length));
-              const { linkedFrom, links } = session.getLinks(ref);
-              return json({ data: { ...session.getSecret(ref), linkedFrom, links } });
-            }
-
-            if ((request.method === "POST" || request.method === "DELETE") && url.pathname === "/api/links") {
-              const body = await readJson<{ primary: string; secret: string }>(request);
-              return json({
-                data: request.method === "POST"
-                  ? session.linkSecrets(body.primary, body.secret)
-                  : session.unlinkSecrets(body.primary, body.secret),
-              });
-            }
-
-            if (request.method === "POST" && url.pathname === "/api/secrets") {
-              const body = await readJson<{
-                algorithm?: string;
-                description?: string;
-                digits?: number;
-                name: string;
-                type: string;
-                url?: string;
-                username?: string;
-                value: string;
-              }>(request);
-              return json({
-                data: session.addSecret({
-                  metadata: Object.fromEntries(
-                    Object.entries({
-                      algorithm: body.algorithm,
-                      description: body.description,
-                      digits: body.digits,
-                      url: body.url,
-                    }).filter(([, value]) => value !== undefined),
-                  ),
-                  name: body.name,
-                  type: body.type,
-                  username: body.username,
-                  value: body.value,
-                }),
-              }, 201);
-            }
-
-            if (request.method === "DELETE" && url.pathname.startsWith("/api/secrets/")) {
-              const ref = decodeURIComponent(url.pathname.slice("/api/secrets/".length));
-              return json({ data: session.removeSecret(ref, { withLinked: url.searchParams.get("withLinked") === "1" }) });
-            }
-
-            if (request.method === "GET" && url.pathname.startsWith("/api/otp/")) {
-              const ref = decodeURIComponent(url.pathname.slice("/api/otp/".length));
-              return json({ data: session.generateOtp(ref) });
-            }
-          } finally {
-            await closeSessionAndRecordSeal(vaultPath, session);
-          }
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const status = /session/i.test(message) ? 401 : 400;
-        return json({ error: message }, status);
-      }
-
-      return json({ error: "Not found" }, 404);
-    },
-    hostname: host,
-    port,
+  const sessions = new SessionStore({
+    idleMs: () => numberPreference("idleLockSeconds") * 1000,
+    onAdminEnd: (handle) => handle.close(),
   });
+  const ctx: ApiContext = { sessions, throttle: new UnlockThrottle(), vaultPath };
+  let hosts = allowedHosts(requestedPort);
+  let cookieName = `autho_session_${requestedPort}`;
 
-  process.on("SIGINT", () => process.exit(0));
-  process.on("SIGTERM", () => process.exit(0));
+  function sessionCookie(session: WebSession | null): string {
+    const base = `${cookieName}=${session?.id ?? ""}; Path=/; HttpOnly; SameSite=Strict`;
+    return session ? base : `${base}; Max-Age=0`;
+  }
 
-  console.log(`Autho web server listening on http://${host}:${server.port}`);
+  function page(): Response {
+    const nonce = newToken(16);
+    return new Response(withNonce(UI_HTML, nonce), {
+      headers: securityHeaders({ "content-security-policy": pageCsp(nonce), "content-type": "text/html; charset=utf-8" }),
+    });
+  }
+
+  async function api(request: Request, url: URL): Promise<Response> {
+    if (!sameOrigin(request, hosts) || request.headers.get(REQUEST_HEADER) !== "1") {
+      return json({ error: "Cross-origin request refused" }, 403);
+    }
+    const match = matchRoute(request.method, url.pathname);
+    if (match === null) return json({ error: "Not found" }, 404);
+    if (match === "method") return json({ error: "Method not allowed" }, 405);
+
+    const sessionId = cookieValue(request, cookieName);
+    const session = sessions.touch(sessionId, request.headers.get(CSRF_HEADER));
+    if (match.route.auth && !session) {
+      return json({ error: "Locked" }, 401, { "set-cookie": sessionCookie(null) });
+    }
+
+    try {
+      const body = await readBody(request, url.pathname === "/api/import" ? MAX_IMPORT_BODY : MAX_BODY);
+      const reply = await match.route.handler(ctx, { body, params: match.params, query: url.searchParams, session });
+      const headers: Record<string, string> = {};
+      // Lock and a fresh unlock end whatever session this browser's cookie names, even
+      // without its CSRF token (another tab, a reload): a session nobody can reach must
+      // not keep its root key alive. Ending a session is the only thing the cookie alone can do.
+      if (reply.session === "ended") {
+        sessions.end(sessionId);
+        headers["set-cookie"] = sessionCookie(null);
+      } else if (reply.session) {
+        sessions.end(sessionId);
+        headers["set-cookie"] = sessionCookie(reply.session);
+      }
+      return json({ data: reply.data }, reply.status ?? 200, headers);
+    } catch (error) {
+      const { status, message } = errorStatus(error);
+      return json({ error: message }, status, error instanceof HttpError ? error.headers : {});
+    }
+  }
+
+  async function fetch(request: Request): Promise<Response> {
+    if (!hostAllowed(request, hosts)) {
+      return new Response("Unknown host", { headers: securityHeaders({ "content-type": "text/plain" }), status: 421 });
+    }
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/")) return api(request, url);
+    if (request.method !== "GET" && request.method !== "HEAD") return json({ error: "Method not allowed" }, 405);
+    if (url.pathname === "/health") return json({ ok: true });
+    if (url.pathname === "/" || url.pathname === "/index.html") return page();
+    return json({ error: "Not found" }, 404);
+  }
+
+  // Passkeys are bound to "localhost", which resolves to either address family; serve both on one port.
+  const servers: ReturnType<typeof Bun.serve>[] = [];
+  const primaryHost = host === "localhost" ? "127.0.0.1" : host;
+  const serveOptions = {
+    fetch,
+    // Unexpected failures (vault I/O, bugs) get a plain message, never Bun's stack-trace page.
+    error: () => json({ error: "Internal error" }, 500),
+    // Refuse oversized bodies at the socket, including chunked ones with no Content-Length.
+    maxRequestBodySize: MAX_IMPORT_BODY + 1024,
+  };
+  servers.push(Bun.serve({ ...serveOptions, hostname: primaryHost, port: requestedPort }));
+  const port = servers[0]!.port!;
+  if (host === "localhost") {
+    try {
+      servers.push(Bun.serve({ ...serveOptions, hostname: "::1", port }));
+    } catch {
+      // No IPv6 loopback here: 127.0.0.1 is enough.
+    }
+  }
+  const exposed = publicPort();
+  hosts = exposed === null ? allowedHosts(port) : new Set([...allowedHosts(port), ...allowedHosts(exposed)]);
+  cookieName = `autho_session_${port}`;
+
+  const sweeper = setInterval(() => sessions.sweep(), SWEEP_MS);
+  sweeper.unref?.();
+
+  return {
+    port,
+    url: `http://localhost:${exposed ?? port}`,
+    stop() {
+      clearInterval(sweeper);
+      sessions.endAll();
+      for (const server of servers) server.stop(true);
+    },
+  };
+}
+
+export async function startWebServer(options: WebServerOptions = {}): Promise<void> {
+  const server = createWebServer(options);
+  const shutdown = () => {
+    server.stop();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+
+  console.log(`Autho web UI: ${server.url}`);
+  console.log("Open it with \"localhost\" (not 127.0.0.1) so passkeys work. Ctrl+C stops it and locks the vault.");
   await new Promise(() => {});
 }

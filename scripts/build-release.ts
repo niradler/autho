@@ -18,6 +18,8 @@ const outfile = `dist/autho-${platform}-${arch}${ext}`;
 
 await mkdir("dist", { recursive: true });
 
+await $`bun run ./scripts/build-ui.ts`;
+
 console.log(`Building ${target} → ${outfile}`);
 await $`bun build ${CLI_ENTRY} --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --target=${target} --outfile=${outfile}`;
 

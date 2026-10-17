@@ -466,6 +466,25 @@ export class AuthoDatabase {
     return row ?? null;
   }
 
+  /** Newest first. */
+  listLeases(limit: number): LeaseRow[] {
+    return this.db
+      .query(
+        `SELECT
+           id,
+           name,
+           secret_refs AS secretRefs,
+           expires_at AS expiresAt,
+           revoked_at AS revokedAt,
+           created_at AS createdAt,
+           include_links AS includeLinks
+         FROM leases
+         ORDER BY created_at DESC
+         LIMIT ?1`,
+      )
+      .all(limit) as LeaseRow[];
+  }
+
   revokeLease(id: string, revokedAt: string): void {
     this.db
       .query("UPDATE leases SET revoked_at = ?2 WHERE id = ?1")
