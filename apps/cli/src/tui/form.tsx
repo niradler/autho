@@ -170,8 +170,8 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
     if (key.name === "up") { key.preventDefault(); moveFocus(-1); return; }
     if (key.name === "down") { key.preventDefault(); moveFocus(1); return; }
     if (focus === "type") {
-      if (key.name === "left" || key.name === "h") cycleType(-1);
-      else if (key.name === "right" || key.name === "l" || key.name === "space") cycleType(1);
+      if (key.name === "left") cycleType(-1);
+      else if (key.name === "right" || key.name === "space") cycleType(1);
       else if (isEnter(key)) moveFocus(1);
     }
   });

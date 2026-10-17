@@ -254,7 +254,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       : []),
     ...(selected.url && selected.type !== "otp" ? [{ id: "open", hotkey: "o", label: "open", color: theme.info, run: () => open(selected) }] : []),
     { id: "edit", hotkey: "e", label: "edit", color: theme.accent, run: () => onEdit(selected.id) },
-    { id: "link", hotkey: "L", label: "link", color: theme.info, run: () => setLinkPickerOpen(true) },
+    { id: "link", hotkey: "l", label: "link", color: theme.info, run: () => setLinkPickerOpen(true) },
     { id: "delete", hotkey: "d", label: "delete", color: theme.danger, run: () => setConfirmDelete(true) },
   ] : [];
   const currentAction = Math.min(actionIndex, Math.max(0, actions.length - 1));
@@ -296,16 +296,14 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       return;
     }
 
-    // Terminals report Shift+L as name "l" with shift set; plain l moves right.
-    if (key.name === "l" && key.shift && selected) { setLinkPickerOpen(true); return; }
+    // l or Shift+L (reported as name "l" with shift set) opens the link picker.
+    if (key.name === "l" && selected) { setLinkPickerOpen(true); return; }
 
     switch (key.name) {
-      case "up": case "k": move(-1); return;
-      case "down": case "j": move(1); return;
+      case "up": move(-1); return;
+      case "down": move(1); return;
       case "pageup": move(-listHeight); return;
       case "pagedown": move(listHeight); return;
-      // Terminals report Shift+G as name "g" with shift set.
-      case "g": move(key.shift ? filtered.length : -filtered.length); return;
       case "home": move(-filtered.length); return;
       case "end": move(filtered.length); return;
       case "/": key.preventDefault(); focusPane("search"); return;
@@ -328,16 +326,16 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
     if (pane === "actions") {
       switch (key.name) {
         // Functional updates: key repeat can land several presses before a re-render.
-        case "left": case "h":
+        case "left":
           if (currentAction === 0) focusPane("list");
           else setActionIndex((i) => Math.max(0, Math.min(i, actions.length - 1) - 1));
           return;
-        case "right": case "l": setActionIndex((i) => Math.min(actions.length - 1, i + 1)); return;
+        case "right": setActionIndex((i) => Math.min(actions.length - 1, i + 1)); return;
         case "space": actions[currentAction]?.run(); return;
       }
       if (isEnter(key)) { actions[currentAction]?.run(); return; }
     } else {
-      if (key.name === "right" || key.name === "l") { focusPane("actions"); return; }
+      if (key.name === "right") { focusPane("actions"); return; }
       if (isEnter(key)) {
         // Wide: the detail is already on screen, so enter is the quick copy. Narrow: open it.
         if (showDetail) copyPrimary(selected);
@@ -373,7 +371,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
         { id: "copy-user", title: `Copy username — ${name}`, hint: "u", group: "Selected", run: () => copyUsername(selected) },
         { id: "reveal", title: `${revealed ? "Hide" : "Reveal"} value — ${name}`, hint: "s", group: "Selected", run: () => toggleReveal(selected) },
         { id: "edit", title: `Edit — ${name}`, hint: "e", group: "Selected", run: () => onEdit(selected.id) },
-        { id: "link", title: `Link secrets — ${name}`, hint: "L", group: "Selected", run: () => setLinkPickerOpen(true) },
+        { id: "link", title: `Link secrets — ${name}`, hint: "l", group: "Selected", run: () => setLinkPickerOpen(true) },
         { id: "delete", title: `Delete — ${name}`, hint: "d", group: "Selected", run: () => setConfirmDelete(true) },
       );
       if (linkedOtpSecret) {
