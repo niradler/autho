@@ -238,6 +238,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
                   onToggleVisible={toggleValue}
                   placeholder={editing ? "leave empty to keep the current value" : type === "otp" ? "base32 key, e.g. JBSWY3DPEHPK3PXP" : ""}
                 />
+                <Button hotkey="ctrl+r" label={showValue ? "hide" : "reveal"} onPress={toggleValue} color={theme.revealed} />
                 {type === "password" ? <Button hotkey="ctrl+g" label="generate" onPress={generate} color={theme.info} /> : null}
               </box>
             ));
