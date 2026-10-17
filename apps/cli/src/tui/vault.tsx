@@ -1,9 +1,10 @@
 import { useKeyboard, useTerminalDimensions } from "@opentui/react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { SecretIndexEntry, VaultSession } from "../../../../packages/core/src/index.ts";
+import type { LinkedSecret, SecretIndexEntry, SecretLinks, VaultSession } from "../../../../packages/core/src/index.ts";
 import { Button, FieldRow, TextField, useNow, type KeyHint } from "./components.tsx";
 import { useApp, useScreenContext, type Command } from "./context.tsx";
+import { LinkPicker } from "./links.tsx";
 import { MASK, TIMINGS, theme, typeBadge, typeLabel } from "./theme.ts";
 import { fuzzyFilter, hostOf, isEnter, openUrl, truncate } from "./util.ts";
 
@@ -42,6 +43,10 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
   const [revealed, setRevealed] = useState<Revealed | null>(null);
   const [otp, setOtp] = useState<Otp | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [links, setLinks] = useState<SecretLinks | null>(null);
+  const [linkPickerOpen, setLinkPickerOpen] = useState(false);
+  /** Live code of the OTP linked to the selected secret, once asked for. */
+  const [linkedOtp, setLinkedOtp] = useState<Otp | null>(null);
 
   const reload = useCallback(() => {
     try {
@@ -73,11 +78,27 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
   useEffect(() => {
     setRevealed((r) => (r && r.id !== selected?.id ? null : r));
     setOtp((o) => (o && o.id !== selected?.id ? null : o));
+    setLinkedOtp(null);
     setConfirmDelete(false);
     setActionIndex(0);
   }, [selected?.id]);
 
-  const now = useNow(1000, Boolean(revealed || otp));
+  const loadLinks = useCallback((id: string | undefined) => {
+    if (!id) { setLinks(null); return; }
+    try {
+      setLinks(session.getLinks(id));
+    } catch (e) {
+      app.toast(e instanceof Error ? e.message : String(e), "error");
+      setLinks(null);
+    }
+  }, [session, app]);
+
+  useEffect(() => loadLinks(selected?.id), [loadLinks, selected?.id, selected?.linkCount]);
+
+  /** The first OTP linked under the selected secret: the login + 2FA pairing. */
+  const linkedOtpSecret: LinkedSecret | null = links?.links.find((l) => l.type === "otp") ?? null;
+
+  const now = useNow(1000, Boolean(revealed || otp || linkedOtp));
 
   useEffect(() => {
     if (revealed && now >= revealed.until) {
@@ -95,17 +116,21 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
   }, [session, app]);
 
   // `audit: false` for the timer refresh of a code already on screen; showing or copying a code is audited.
-  const generateOtp = useCallback((entry: SecretIndexEntry, options?: { audit?: boolean }): Otp | null => {
+  const makeOtp = useCallback((id: string, options?: { audit?: boolean }): Otp | null => {
     try {
-      const result = session.generateOtp(entry.id, options);
-      const next = { id: entry.id, code: result.code, expiresAt: Date.parse(result.expiresAt) };
-      setOtp(next);
-      return next;
+      const result = session.generateOtp(id, options);
+      return { id, code: result.code, expiresAt: Date.parse(result.expiresAt) };
     } catch (e) {
       app.toast(e instanceof Error ? e.message : String(e), "error");
       return null;
     }
   }, [session, app]);
+
+  const generateOtp = useCallback((entry: SecretIndexEntry, options?: { audit?: boolean }): Otp | null => {
+    const next = makeOtp(entry.id, options);
+    if (next) setOtp(next);
+    return next;
+  }, [makeOtp]);
 
   // Keep a shown OTP code current while its secret stays selected.
   useEffect(() => {
@@ -113,6 +138,37 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       generateOtp(selected, { audit: false });
     }
   }, [now, otp, selected, generateOtp]);
+
+  useEffect(() => {
+    if (linkedOtp && linkedOtp.id === linkedOtpSecret?.id && now >= linkedOtp.expiresAt) {
+      setLinkedOtp(makeOtp(linkedOtp.id, { audit: false }));
+    }
+  }, [now, linkedOtp, linkedOtpSecret?.id, makeOtp]);
+
+  /** Shows and copies the linked OTP's code; audited like copying the OTP itself. */
+  const copyLinkedOtp = useCallback(() => {
+    if (!linkedOtpSecret) {
+      app.toast("No OTP linked to this secret", "info");
+      return;
+    }
+    const code = makeOtp(linkedOtpSecret.id);
+    if (!code) return;
+    setLinkedOtp(code);
+    void app.copy("OTP code", code.code, { secret: true });
+  }, [app, linkedOtpSecret, makeOtp]);
+
+  const toggleLink = useCallback((primary: SecretIndexEntry, target: SecretIndexEntry) => {
+    const linked = links?.links.some((l) => l.id === target.id) ?? false;
+    try {
+      if (linked) session.unlinkSecrets(primary.id, target.id);
+      else session.linkSecrets(primary.id, target.id);
+      app.toast(linked ? `Unlinked ${target.name}` : `Linked ${target.name}`, "info");
+    } catch (e) {
+      app.toast(e instanceof Error ? e.message : String(e), "error");
+    }
+    reload();
+    loadLinks(primary.id);
+  }, [links, session, app, reload, loadLinks]);
 
   const copyPrimary = useCallback((entry: SecretIndexEntry | null) => {
     if (!entry) return;
@@ -196,6 +252,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       : []),
     ...(selected.url && selected.type !== "otp" ? [{ id: "open", hotkey: "o", label: "open", color: theme.info, run: () => open(selected) }] : []),
     { id: "edit", hotkey: "e", label: "edit", color: theme.accent, run: () => onEdit(selected.id) },
+    { id: "link", hotkey: "L", label: "link", color: theme.info, run: () => setLinkPickerOpen(true) },
     { id: "delete", hotkey: "d", label: "delete", color: theme.danger, run: () => setConfirmDelete(true) },
   ] : [];
   const currentAction = Math.min(actionIndex, Math.max(0, actions.length - 1));
@@ -219,7 +276,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
   };
 
   useKeyboard((key) => {
-    if (!app.active || key.ctrl || key.meta) return;
+    if (!app.active || key.ctrl || key.meta || linkPickerOpen) return;
 
     if (confirmDelete) {
       key.preventDefault();
@@ -235,6 +292,9 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       else if (isEnter(key) || key.name === "down") { key.preventDefault(); setPane("list"); }
       return;
     }
+
+    // Terminals report Shift+L as name "l" with shift set; plain l moves right.
+    if (key.name === "l" && key.shift && selected) { setLinkPickerOpen(true); return; }
 
     switch (key.name) {
       case "up": case "k": move(-1); return;
@@ -292,6 +352,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
         else open(selected);
         return;
       case "e": onEdit(selected.id); return;
+      case "t": copyLinkedOtp(); return;
       case "d": case "delete": setConfirmDelete(true); return;
     }
   });
@@ -309,8 +370,12 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
         { id: "copy-user", title: `Copy username — ${name}`, hint: "u", group: "Selected", run: () => copyUsername(selected) },
         { id: "reveal", title: `${revealed ? "Hide" : "Reveal"} value — ${name}`, hint: "s", group: "Selected", run: () => toggleReveal(selected) },
         { id: "edit", title: `Edit — ${name}`, hint: "e", group: "Selected", run: () => onEdit(selected.id) },
+        { id: "link", title: `Link secrets — ${name}`, hint: "L", group: "Selected", run: () => setLinkPickerOpen(true) },
         { id: "delete", title: `Delete — ${name}`, hint: "d", group: "Selected", run: () => setConfirmDelete(true) },
       );
+      if (linkedOtpSecret) {
+        list.splice(1, 0, { id: "copy-linked-otp", title: `Copy ${linkedOtpSecret.name} code — ${name}`, hint: "t", group: "Selected", run: copyLinkedOtp });
+      }
       if (selected.url) {
         list.splice(2, 0,
           { id: "copy-url", title: `Copy URL — ${name}`, hint: "w", group: "Selected", run: () => copyUrl(selected) },
@@ -327,7 +392,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       });
     }
     return list;
-  }, [entries, selected, revealed, onCreate, onEdit, reload, copyPrimary, copyUsername, copyUrl, toggleReveal]);
+  }, [entries, selected, revealed, linkedOtpSecret, onCreate, onEdit, reload, copyPrimary, copyUsername, copyUrl, toggleReveal, copyLinkedOtp]);
 
   useScreenContext(commands, selected ? {
     label: selected.type === "otp" ? "OTP code" : selected.type === "note" ? "Note" : "Password",
@@ -383,7 +448,8 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
             <text>
               <span fg={badge.color}>{badge.glyph} </span>
               {isSelected ? <strong fg={theme.accent}>{name}</strong> : <span fg={theme.text}>{name}</span>}
-              <span fg={theme.dim}>{sub ? `  ${truncate(sub, Math.max(0, room - name.length - 2))}` : ""}</span>
+              {entry.linkCount ? <span fg={theme.muted}> ·{entry.linkCount}</span> : null}
+              <span fg={theme.dim}>{sub ? `  ${truncate(sub, Math.max(0, room - name.length - 2 - (entry.linkCount ? 3 : 0)))}` : ""}</span>
             </text>
           </box>
         );
@@ -398,6 +464,8 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       otp={otp?.id === selected.id ? otp : null}
       now={now}
       confirmDelete={confirmDelete}
+      links={links}
+      linkedOtp={linkedOtp}
       actions={actions}
       focusedAction={pane === "actions" ? currentAction : null}
     />
@@ -417,7 +485,33 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
         {wide || !detailOpen ? list : null}
         {showDetail ? detail : null}
       </box>
+      {linkPickerOpen && selected ? (
+        <LinkPicker
+          primary={selected}
+          entries={entries}
+          linkedIds={new Set(links?.links.map((l) => l.id) ?? [])}
+          onToggle={(target) => toggleLink(selected, target)}
+          onClose={() => setLinkPickerOpen(false)}
+        />
+      ) : null}
     </box>
+  );
+}
+
+/** One linked secret; a linked OTP shows its live code once asked for with t. */
+function LinkedRow({ link, otp, now }: { link: LinkedSecret; otp: Otp | null; now: number }) {
+  const badge = typeBadge(link.type);
+  const seconds = otp ? Math.max(0, Math.ceil((otp.expiresAt - now) / 1000)) : 0;
+  return (
+    <text>
+      <span fg={badge.color}> {badge.glyph} </span>
+      <span fg={theme.text}>{link.name}</span>
+      {link.type === "otp" ? (
+        otp
+          ? <><span fg={theme.success}><strong>{`   ${otp.code.slice(0, 3)} ${otp.code.slice(3)}`}</strong></span><span fg={seconds <= 5 ? theme.danger : theme.muted}> {seconds}s</span></>
+          : <span fg={theme.dim}>   press t for the code</span>
+      ) : null}
+    </text>
   );
 }
 
@@ -425,12 +519,14 @@ function valueName(type: string): string {
   return type === "note" ? "Note" : type === "otp" ? "Secret key" : "Password";
 }
 
-function Detail({ entry, revealed, otp, now, confirmDelete, actions, focusedAction }: {
+function Detail({ entry, revealed, otp, now, confirmDelete, links, linkedOtp, actions, focusedAction }: {
   entry: SecretIndexEntry;
   revealed: Revealed | null;
   otp: Otp | null;
   now: number;
   confirmDelete: boolean;
+  links: SecretLinks | null;
+  linkedOtp: Otp | null;
   actions: Action[];
   /** Index of the keyboard-focused action, or null when focus is elsewhere. */
   focusedAction: number | null;
@@ -472,6 +568,16 @@ function Detail({ entry, revealed, otp, now, confirmDelete, actions, focusedActi
               <text><span fg={otpSeconds <= 5 ? theme.danger : theme.success}>{"█".repeat(otpFilled)}</span><span fg={theme.chip}>{"█".repeat(otpBar - otpFilled)}</span><span fg={otpSeconds <= 5 ? theme.danger : theme.muted}> {otpSeconds}s</span></text>
             </>
           ) : <text fg={theme.dim}>press o to show the code</text>}
+        </box>
+      ) : null}
+
+      {links && (links.links.length > 0 || links.linkedFrom.length > 0) ? (
+        <box flexDirection="column">
+          {links.links.length > 0 ? <text fg={theme.muted}>Linked</text> : null}
+          {links.links.map((link) => <LinkedRow key={link.id} link={link} otp={linkedOtp?.id === link.id ? linkedOtp : null} now={now} />)}
+          {links.linkedFrom.length > 0 ? (
+            <text><span fg={theme.muted}>Linked from  </span><span fg={theme.text}>{links.linkedFrom.map((l) => l.name).join(", ")}</span></text>
+          ) : null}
         </box>
       ) : null}
 
