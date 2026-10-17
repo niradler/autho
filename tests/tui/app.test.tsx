@@ -216,7 +216,8 @@ describe("Navigation", () => {
     await renderUnlocked();
     t!.mockInput.pressTab();
     await frameContaining("choose");
-    // copy · open · edit · delete — three quick presses land on delete.
+    // copy · reveal · open · edit · delete — four quick presses land on delete.
+    t!.mockInput.pressArrow("right");
     t!.mockInput.pressArrow("right");
     t!.mockInput.pressArrow("right");
     t!.mockInput.pressArrow("right");

@@ -21,14 +21,17 @@ import {
   setPreference,
   type PasskeyInfo,
   type PreferenceKey,
+  type SealRecord,
   type VaultAdmin,
 } from "../../../../packages/core/src/index.ts";
 import {
   deletePin,
   deleteVaultPassword,
   hasPinSet,
+  loadSealRecord,
   loadVaultPassword,
   osSecretsDisabled,
+  saveSealRecord,
   storePinHash,
   storeVaultPassword,
 } from "../../../../packages/core/src/os-secrets.ts";
@@ -129,12 +132,19 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
   }, [vaultPath, osStore]);
 
   useEffect(() => { void refreshStatus(); }, [refreshStatus]);
+  // Newest seal seen for this vault, so admin unlock refuses an older copy of the file.
+  const sealRecord = useRef<SealRecord | null>(null);
+  useEffect(() => { void loadSealRecord(vaultPath).then((record) => { sealRecord.current = record; }); }, [vaultPath]);
 
   useEffect(() => () => {
     passkeyAbort.current?.abort();
-    admin.current?.close();
+    const current = admin.current;
     admin.current = null;
-  }, []);
+    if (current) {
+      current.close();
+      void saveSealRecord(vaultPath, current.sealRecord());
+    }
+  }, [vaultPath]);
 
   const writeFields = (next: string[]) => {
     fieldsRef.current = next;
@@ -343,7 +353,7 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
         if (!first) return;
         if (status?.totp && field === 0) { setField(1); return; }
         try {
-          admin.current = VaultService.authorize(vaultPath, { password: first, totp: status?.totp ? second : undefined });
+          admin.current = VaultService.authorize(vaultPath, { password: first, sealRecord: sealRecord.current, totp: status?.totp ? second : undefined });
         } catch (e) {
           setError(message(e));
           writeFields(["", ""]);
