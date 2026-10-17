@@ -164,7 +164,7 @@ Run `autho` with no arguments to open the TUI.
 | `n` / `e` / `d` | New / edit / delete (`a` in the delete prompt also deletes linked secrets) |
 | `l` | Link or unlink secrets under the selected one |
 | `t` | Show and copy the linked OTP's code |
-| `,` | Settings |
+| `1`–`5` | Switch tab: Vault, Leases, Audit, Integrity, Settings |
 | `q` | Quit |
 | `ctrl+k` / `?` | Command palette: every action on the current screen, plus jump to any secret |
 | `ctrl+l` | Lock now |
@@ -181,7 +181,7 @@ Run `autho` with no arguments to open the TUI.
 
 ## Settings
 
-Press `,` in the TUI (or pick Settings in the palette) for one page with everything configurable:
+Press `5` in the TUI (or pick Settings in the palette) for one page with everything configurable:
 
 | Section | What you can do |
 | --- | --- |

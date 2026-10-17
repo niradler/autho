@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 
 import { createCliRenderer, type CliRenderer } from "@opentui/core";
-import { createRoot, useKeyboard, useRenderer, useSelectionHandler } from "@opentui/react";
+import { createRoot, useKeyboard, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { booleanPreference, defaultVaultPath, numberPreference } from "../../../packages/core/src/index.ts";
@@ -10,8 +10,11 @@ import { closeSessionAndRecordSeal } from "../../../packages/core/src/os-secrets
 import { createWebServer, type WebServer } from "../../web/src/server.ts";
 import { Clipboard } from "./clipboard.ts";
 import { Header, StatusBar, type KeyHint } from "./tui/components.tsx";
-import { AppContext, describeCopy, type AppApi, type Command, type CopyTarget, type Timings, type Toast, type ToastKind } from "./tui/context.tsx";
+import { AuditScreen } from "./tui/audit.tsx";
+import { AppContext, PAGES, describeCopy, type AppApi, type Command, type CopyTarget, type Page, type Timings, type Toast, type ToastKind } from "./tui/context.tsx";
 import { SecretForm } from "./tui/form.tsx";
+import { IntegrityScreen } from "./tui/integrity.tsx";
+import { LeasesScreen } from "./tui/leases.tsx";
 import { CommandPalette } from "./tui/palette.tsx";
 import { SettingsScreen, type WebStatus } from "./tui/settings.tsx";
 import { TIMINGS, theme } from "./tui/theme.ts";
@@ -22,6 +25,9 @@ type Route =
   | { name: "unlock"; notice?: string }
   | { name: "vault"; focusId?: string }
   | { name: "form"; editing: SecretRecord | null }
+  | { name: "leases" }
+  | { name: "audit" }
+  | { name: "integrity" }
   | { name: "settings" };
 
 export type TuiOptions = {
@@ -42,6 +48,7 @@ export type TuiOptions = {
 
 export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboardClearMs: initialClipboardClearMs, idleLockMs: initialIdleLockMs, onQuit, sessionSink, passkeyRunner, web }: TuiOptions) {
   const renderer = useRenderer();
+  const { width } = useTerminalDimensions();
   const [timings, setTimingsState] = useState<Timings>({ revealMs: initialRevealMs, clipboardClearMs: initialClipboardClearMs, idleLockMs: initialIdleLockMs });
   const { revealMs, clipboardClearMs, idleLockMs } = timings;
   const setTimings = useCallback((next: Partial<Timings>) => setTimingsState((prev) => ({ ...prev, ...next })), []);
@@ -93,6 +100,11 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
   }, [onQuit]);
 
   const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const go = useCallback((page: Page) => {
+    if (!sessionRef.current) return;
+    setPaletteOpen(false);
+    setRoute({ name: page } as Route);
+  }, []);
 
   const api = useMemo<AppApi>(() => ({
     active: !paletteOpen,
@@ -101,10 +113,11 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
     lock: () => lock(),
     quit,
     openPalette,
+    go,
     setTimings,
     commandsRef,
     copyTargetRef,
-  }), [paletteOpen, toast, copy, lock, quit, openPalette, setTimings]);
+  }), [paletteOpen, toast, copy, lock, quit, openPalette, go, setTimings]);
 
   /**
    * Ctrl+C never exits straight away. The first press copies the mouse
@@ -197,20 +210,19 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
 
   const globalCommands: Command[] = [
     ...(session ? [
-      { id: "settings", title: "Settings", hint: ",", group: "App", run: () => setRoute({ name: "settings" }) },
+      ...PAGES.map((p) => ({ id: `go:${p.page}`, title: p.page === "settings" ? "Settings" : `Go to ${p.label}`, hint: p.key, group: "Navigate", run: () => go(p.page) })),
       { id: "lock", title: "Lock vault", hint: "ctrl+l", group: "App", run: () => lock() },
     ] : []),
     { id: "quit", title: "Quit", hint: "ctrl+c ×2", group: "App", run: quit },
   ];
 
   const goVault = useCallback(() => setRoute({ name: "vault" }), []);
-  const goSettings = useCallback(() => setRoute({ name: "settings" }), []);
-  // Pinned at the right of the status bar so the way to Settings and the palette is always visible.
-  const globalHints: KeyHint[] = !session || route.name === "unlock" ? []
-    : route.name === "vault" ? [["ctrl+k", "commands"], [",", "settings"]]
-      : [["ctrl+k", "commands"]];
+  // Pinned at the right of the status bar so the palette is always discoverable; the tabs show the page keys.
+  const globalHints: KeyHint[] = !session || route.name === "unlock" ? [] : [["ctrl+k", "commands"]];
 
-  const title = route.name === "unlock" ? "Locked" : route.name === "form" ? (route.editing ? "Edit secret" : "New secret") : route.name === "settings" ? "Settings" : "Vault";
+  const title = route.name === "unlock" ? "Locked" : route.name === "form" ? (route.editing ? "Edit secret" : "New secret") : PAGES.find((p) => p.page === route.name)?.label ?? "Vault";
+  // Tabs once unlocked; the unlock screen and the secret form keep a plain title.
+  const showTabs = session !== null && route.name !== "unlock" && route.name !== "form";
   const vaultName = basename(vaultPath);
 
   let screen;
@@ -227,6 +239,12 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
         onDone={(message, id) => { toast(message); setRoute({ name: "vault", focusId: id }); }}
       />
     );
+  } else if (route.name === "leases") {
+    screen = <LeasesScreen session={session} setHints={setHints} />;
+  } else if (route.name === "audit") {
+    screen = <AuditScreen session={session} setHints={setHints} />;
+  } else if (route.name === "integrity") {
+    screen = <IntegrityScreen session={session} vaultPath={vaultPath} setHints={setHints} />;
   } else if (route.name === "settings") {
     screen = <SettingsScreen vaultPath={vaultPath} setHints={setHints} onBack={goVault} passkeyRunner={passkeyRunner} web={web} />;
   } else {
@@ -237,7 +255,6 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
         initialSelectedId={route.focusId}
         onCreate={() => setRoute({ name: "form", editing: null })}
         onEdit={onEdit}
-        onSettings={goSettings}
         setHints={setHints}
         revealMs={revealMs}
       />
@@ -255,7 +272,10 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
       >
         <Header
           title={title}
-          right={<text fg={theme.dim}>{session ? <span fg={theme.success}>● unlocked</span> : <span fg={theme.muted}>○ locked</span>}  {vaultName}</text>}
+          tabs={showTabs ? PAGES.map((p) => ({ id: p.page, label: p.label, key: p.key })) : undefined}
+          activeTab={route.name}
+          onTab={(id) => go(id as Page)}
+          right={<text fg={theme.dim}>{session ? <span fg={theme.success}>● unlocked</span> : <span fg={theme.muted}>○ locked</span>}{showTabs && width < 96 ? "" : `  ${vaultName}`}</text>}
         />
         <box flexDirection="column" flexGrow={1}>{screen}</box>
         <StatusBar hints={hints} pinned={globalHints} toast={toastState} />
