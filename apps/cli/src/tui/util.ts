@@ -133,3 +133,38 @@ export function truncate(text: string, width: number): string {
 export function hostOf(url: string): string {
   return url.replace(/^[a-z]+:\/\//i, "").replace(/\/$/, "");
 }
+
+/** "in 42m", "3h ago": compact, so it fits list rows. */
+export function relativeTime(iso: string, now = Date.now()): string {
+  const diff = Date.parse(iso) - now;
+  if (Number.isNaN(diff)) return iso;
+  const abs = Math.abs(diff);
+  // Pick the unit after rounding, so 59m59s reads "1h", not "60m".
+  const units: [ms: number, unit: string, max: number][] = [[1000, "s", 60], [60_000, "m", 60], [3_600_000, "h", 24], [86_400_000, "d", Infinity]];
+  const [ms, unit] = units.find(([size, , max]) => Math.round(abs / size) < max)!;
+  const amount = `${Math.round(abs / ms)}${unit}`;
+  return diff >= 0 ? `in ${amount}` : `${amount} ago`;
+}
+
+/** Local "YYYY-MM-DD HH:MM". */
+export function formatDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export function formatDuration(seconds: number): string {
+  if (seconds >= 86_400 && seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+  if (seconds >= 3600 && seconds % 3600 === 0) return `${seconds / 3600}h`;
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
+}
+
+/** Parses "90", "15m", "2h", "1d" into seconds; null when it isn't a duration. */
+export function parseDuration(text: string): number | null {
+  const match = /^\s*(\d+)\s*([smhd]?)\s*$/i.exec(text);
+  if (!match) return null;
+  const factor = { "": 1, s: 1, m: 60, h: 3600, d: 86_400 }[match[2]!.toLowerCase() as "" | "s" | "m" | "h" | "d"];
+  return Number(match[1]) * factor;
+}

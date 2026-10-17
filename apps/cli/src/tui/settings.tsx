@@ -38,7 +38,7 @@ import {
 import pkg from "../../package.json";
 import { newPrfSalt, runPasskeyCeremony } from "../passkey.ts";
 import { SecretInput, TextField, type KeyHint } from "./components.tsx";
-import { useApp, useScreenContext, type Command, type CopyTarget, type Timings } from "./context.tsx";
+import { handlePageKey, useApp, useScreenContext, type Command, type CopyTarget, type Timings } from "./context.tsx";
 import { theme } from "./theme.ts";
 import type { PasskeyRunner } from "./unlock.tsx";
 import { isEnter, truncate } from "./util.ts";
@@ -501,6 +501,7 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
       return;
     }
     if (key.name === "q") { onBack(); return; }
+    if (handlePageKey(app, key)) return;
     if (key.name === "tab") { key.preventDefault(); setFocus(focus === "nav" ? "rows" : "nav"); return; }
     if (focus === "nav") {
       switch (key.name) {

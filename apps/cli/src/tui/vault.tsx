@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { LinkedSecret, SecretIndexEntry, SecretLinks, VaultSession } from "../../../../packages/core/src/index.ts";
 import { Button, FieldRow, TextField, useNow, type KeyHint } from "./components.tsx";
-import { useApp, useScreenContext, type Command } from "./context.tsx";
+import { handlePageKey, useApp, useScreenContext, type Command } from "./context.tsx";
 import { LinkPicker } from "./links.tsx";
 import { MASK, TIMINGS, theme, typeBadge, typeLabel } from "./theme.ts";
 import { fuzzyFilter, hostOf, isEnter, openUrl, truncate } from "./util.ts";
@@ -19,13 +19,12 @@ const PANES: Pane[] = ["search", "list", "actions"];
 /** Wide terminals get a list + preview layout; narrow ones switch between the two. */
 const WIDE_MIN_COLUMNS = 96;
 
-export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSettings, setHints, revealMs }: {
+export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setHints, revealMs }: {
   session: VaultSession;
   /** Secret to select on mount, e.g. the one just created or edited. */
   initialSelectedId?: string;
   onCreate: () => void;
   onEdit: (id: string) => void;
-  onSettings: () => void;
   setHints: (hints: KeyHint[]) => void;
   revealMs: number;
 }) {
@@ -298,6 +297,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
 
     // l or Shift+L (reported as name "l" with shift set) opens the link picker.
     if (key.name === "l" && selected) { setLinkPickerOpen(true); return; }
+    if (handlePageKey(app, key)) return;
 
     switch (key.name) {
       case "up": move(-1); return;
@@ -310,7 +310,6 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       case "n": onCreate(); return;
       case "q": app.quit(); return;
       case "?": app.openPalette(); return;
-      case ",": onSettings(); return;
       case "r": reload(); app.toast("Reloaded", "info"); return;
     }
 

@@ -86,7 +86,7 @@ autho passkey add|list|remove [--label <name>]
 autho config show|path|set <key> <value>|unset <key>
 ```
 
-Run `autho` with no arguments for the terminal UI; press `,` there for Settings (paths, unlock methods, timeouts, agent defaults).
+Run `autho` with no arguments for the terminal UI; press `5` there for Settings (paths, unlock methods, timeouts, agent defaults).
 
 Run `autho help` for the full reference.
 

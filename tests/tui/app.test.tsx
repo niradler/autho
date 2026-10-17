@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -206,11 +207,119 @@ describe("TUI", () => {
 });
 
 describe("Navigation", () => {
-  test("the settings shortcut is always in the status bar on a wide terminal", async () => {
+  test("the header shows the page tabs and the command palette key stays pinned", async () => {
     await renderUnlocked(160);
     const frame = await settle();
-    expect(frame).toContain("settings");
+    for (const tab of ["1 Vault", "2 Leases", "3 Audit", "4 Integrity", "5 Settings"]) expect(frame).toContain(tab);
     expect(frame).toContain("commands");
+  });
+
+  test("number keys switch tabs and esc returns to the vault", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressKey("2");
+    await frameContaining("No active leases");
+    t!.mockInput.pressKey("3");
+    await frameContaining("filter by event");
+    t!.mockInput.pressKey("4");
+    await frameContaining("Vault seal");
+    t!.mockInput.pressEscape();
+    await frameContaining("octocat");
+  });
+
+  test("leases: create one over a secret, then revoke it", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressKey("2");
+    await frameContaining("No active leases");
+    t!.mockInput.pressKey("n");
+    await frameContaining("New lease");
+    await settle();
+    await t!.mockInput.typeText("ci");
+    t!.mockInput.pressTab();
+    t!.mockInput.pressTab();
+    await settle();
+    t!.mockInput.pressEnter();
+    await frameContaining("1 picked");
+    t!.mockInput.pressKey("s", { ctrl: true });
+    await frameContaining("expires in 1h");
+    const [lease] = sink.current!.listLeases(10);
+    expect(lease!.name).toBe("ci");
+    expect(sink.current!.showLease(lease!.id).coverage.map((c) => c.name)).toEqual(["github"]);
+    t!.mockInput.pressKey("x");
+    await frameContaining('Revoke "ci"?');
+    t!.mockInput.pressKey("y");
+    await frameContaining('Revoked "ci"');
+    expect(sink.current!.showLease(lease!.id).lease.revokedAt).not.toBeNull();
+  });
+
+  test("leases: a bad duration is rejected without creating anything", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressKey("2");
+    await frameContaining("No active leases");
+    t!.mockInput.pressKey("n");
+    await frameContaining("New lease");
+    await settle();
+    t!.mockInput.pressTab();
+    await settle();
+    await t!.mockInput.typeText("x");
+    t!.mockInput.pressKey("s", { ctrl: true });
+    await frameContaining("use a duration like");
+    expect(sink.current!.listLeases(10)).toEqual([]);
+  });
+
+  test("audit: lists events and filters them", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressKey("3");
+    await frameContaining("events · last 100");
+    t!.mockInput.pressKey("/");
+    await settle();
+    await t!.mockInput.typeText("zzz-nothing");
+    await frameContaining('No events match "zzz-nothing"');
+    t!.mockInput.pressEscape();
+    await frameContaining("filter by event");
+    t!.mockInput.pressKey("m");
+    await frameContaining("last 200");
+  });
+
+  test("integrity: a change made outside autho is shown and undone after the password", async () => {
+    const setup = VaultService.unlock(vaultPath, PASSWORD);
+    setup.addSecret({ name: "aws", type: "password", value: "aws-value" });
+    const [github, aws] = [setup.getSecret("github").id, setup.getSecret("aws").id];
+    setup.close();
+    const raw = new Database(vaultPath);
+    raw.query("INSERT INTO secret_links (primary_id, linked_id, created_at) VALUES (?1, ?2, ?3)").run(github, aws, new Date().toISOString());
+    raw.close();
+
+    await renderUnlocked();
+    t!.mockInput.pressKey("4");
+    await frameContaining("Changed outside autho");
+    expect(await frameContaining("secret_links")).toContain("added");
+    t!.mockInput.pressKey("u");
+    await frameContaining("Master password");
+    await settle();
+    await t!.mockInput.typeText("wrong-password");
+    t!.mockInput.pressEnter();
+    await frameContaining("Invalid vault password");
+    await t!.mockInput.typeText(PASSWORD);
+    t!.mockInput.pressEnter();
+    await frameContaining("Re-sealed");
+    await frameContaining("Intact");
+    expect(sink.current!.getLinks("github").links).toEqual([]);
+  });
+
+  test("integrity: shows an intact seal and imports a legacy backup", async () => {
+    const backup = join(dir, "legacy.json");
+    writeFileSync(backup, JSON.stringify([{ name: "legacy-api", type: "note", value: "abc" }]));
+    await renderUnlocked();
+    t!.mockInput.pressKey("4");
+    await frameContaining("Intact");
+    t!.mockInput.pressArrow("down");
+    t!.mockInput.pressEnter();
+    await frameContaining("enter to import");
+    await settle();
+    await t!.mockInput.typeText(backup);
+    t!.mockInput.pressEnter();
+    await frameContaining("Imported 1 secret");
+    expect(sink.current!.listSecretIndex().map((s) => s.name)).toContain("legacy-api");
   });
 
   test("tab moves into the actions, arrows pick one and enter runs it", async () => {
@@ -249,7 +358,7 @@ describe("Navigation", () => {
 
   test("settings opens on the sidebar; arrows change section until → enters it", async () => {
     await renderUnlocked();
-    t!.mockInput.pressKey(",");
+    t!.mockInput.pressKey("5");
     await frameContaining("Vault file");
     t!.mockInput.pressArrow("down");
     await frameContaining("Master password");
@@ -363,7 +472,7 @@ describe("Links", () => {
 describe("Settings", () => {
   async function openSettings(): Promise<void> {
     await renderUnlocked();
-    t!.mockInput.pressKey(",");
+    t!.mockInput.pressKey("5");
     await frameContaining("Vault file");
   }
 
@@ -382,7 +491,7 @@ describe("Settings", () => {
 
   test("shows the web UI served alongside the TUI", async () => {
     await renderUnlocked(120, 30_000, { url: "http://localhost:8061", note: "running while the TUI is open" });
-    t!.mockInput.pressKey(",");
+    t!.mockInput.pressKey("5");
     await frameContaining("Vault file");
     const frame = await goToSection("Agents & services");
     expect(frame).toContain("Web UI with TUI");

@@ -1,5 +1,7 @@
 import { createContext, useContext, useEffect, useRef } from "react";
 
+import type { KeyEvent } from "@opentui/core";
+
 import type { CopyResult } from "../clipboard.ts";
 
 export type Timings = { revealMs: number; clipboardClearMs: number; idleLockMs: number };
@@ -16,6 +18,17 @@ export type Command = {
   run: () => void;
 };
 
+/** Top-level pages, shown as header tabs once the vault is unlocked. */
+export type Page = "vault" | "leases" | "audit" | "integrity" | "settings";
+
+export const PAGES: { page: Page; label: string; key: string }[] = [
+  { page: "vault", label: "Vault", key: "1" },
+  { page: "leases", label: "Leases", key: "2" },
+  { page: "audit", label: "Audit", key: "3" },
+  { page: "integrity", label: "Integrity", key: "4" },
+  { page: "settings", label: "Settings", key: "5" },
+];
+
 /** What Ctrl+C copies when nothing is selected with the mouse. */
 export type CopyTarget = { label: string; read: () => string | null; secret: boolean };
 
@@ -27,6 +40,8 @@ export type AppApi = {
   lock: () => void;
   quit: () => void;
   openPalette: () => void;
+  /** Switches to a top-level page. */
+  go: (page: Page) => void;
   /** Applies changed TUI timings from Settings without a restart. */
   setTimings: (next: Partial<Timings>) => void;
   /** Screens publish contextual palette commands and the Ctrl+C copy target. */
@@ -59,6 +74,19 @@ export function useScreenContext(commands: Command[], copyTarget: CopyTarget | n
       app.copyTargetRef.current = null;
     }
   }, [app]);
+}
+
+/**
+ * Page keys (1-5). Screens call this only while no field has the
+ * keyboard, so the keys still type into inputs.
+ */
+export function handlePageKey(app: AppApi, key: KeyEvent): boolean {
+  if (key.ctrl || key.meta || key.shift) return false;
+  const target = PAGES.find((p) => p.key === key.name || p.key === key.sequence);
+  if (!target) return false;
+  key.preventDefault();
+  app.go(target.page);
+  return true;
 }
 
 export function describeCopy(label: string, result: CopyResult, clearSeconds: number | null): Toast {

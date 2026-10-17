@@ -6,11 +6,33 @@ import type { Toast } from "./context.tsx";
 import { theme } from "./theme.ts";
 import { cleanPaste, isEnter, typedText } from "./util.ts";
 
-export function Header({ title, right }: { title: string; right?: ReactNode }) {
+export type Tab = { id: string; label: string; key: string };
+
+/** Top bar: the logo, then either the page tabs or a plain title (unlock, forms). */
+export function Header({ title, tabs, activeTab, onTab, right }: {
+  title: string;
+  tabs?: Tab[];
+  activeTab?: string;
+  onTab?: (id: string) => void;
+  right?: ReactNode;
+}) {
   return (
     <box width="100%" height={2} flexDirection="row" paddingX={1} justifyContent="space-between" border={["bottom"]} borderColor={theme.border}>
-      <text><span bg={theme.accent} fg={theme.onAccent}><strong> autho </strong></span><span fg={theme.dim}>  </span><strong fg={theme.text}>{title}</strong></text>
-      {right ?? null}
+      <box flexDirection="row" height={1} flexShrink={1} overflow="hidden">
+        <text flexShrink={0}><span bg={theme.accent} fg={theme.onAccent}><strong> autho </strong></span><span fg={theme.dim}> </span></text>
+        {tabs ? tabs.map((tab) => {
+          const active = tab.id === activeTab;
+          return (
+            <box key={tab.id} height={1} flexShrink={0} marginLeft={1} backgroundColor={active ? theme.selection : undefined} onMouseDown={() => onTab?.(tab.id)}>
+              <text>
+                <span fg={active ? theme.accent : theme.dim}> {tab.key} </span>
+                {active ? <strong fg={theme.accent}>{tab.label} </strong> : <span fg={theme.muted}>{tab.label} </span>}
+              </text>
+            </box>
+          );
+        }) : <text flexShrink={0}><span fg={theme.dim}> </span><strong fg={theme.text}>{title}</strong></text>}
+      </box>
+      {right ? <box flexShrink={0} marginLeft={1}>{right}</box> : null}
     </box>
   );
 }
