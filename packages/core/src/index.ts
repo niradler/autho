@@ -52,6 +52,7 @@ import {
   defaultVaultPath,
   writeTextFileSecure,
 } from "./paths.ts";
+import { numberPreference } from "./settings.ts";
 
 export type SecretType = "note" | "otp" | "password";
 
@@ -67,7 +68,14 @@ export type UnlockCredentials = {
    * or a removed seal, whichever way the vault was unlocked.
    */
   sealRecord?: SealRecord | null;
+  /** Not a credential: the interface asking, recorded in the audit log. */
+  source?: AuditSource;
 };
+
+/** The interface an audited action came from. */
+export type AuditSource = "cli" | "tui" | "web" | "daemon";
+
+export const AUDIT_SOURCES: readonly AuditSource[] = ["cli", "tui", "web", "daemon"];
 
 /** Public passkey details: safe to show before unlocking. */
 export type PasskeyInfo = Omit<VaultPasskey, "wrappedRootKey">;
@@ -149,10 +157,78 @@ export type AuditEvent = {
   createdAt: string;
   eventType: string;
   id: string;
+  /** The lease the access went through, when there was one. */
+  leaseId: string | null;
   message: string;
   metadata: Record<string, unknown>;
+  /** Null on events recorded before sources were tracked. */
+  source: AuditSource | null;
   subjectRef: string | null;
   subjectType: string;
+};
+
+export type AuditQuery = {
+  /** A prefix: "secret." matches every secret event. */
+  eventType?: string;
+  /** A lease id or name. */
+  leaseRef?: string;
+  limit?: number;
+  source?: AuditSource;
+  /** A secret id or name. */
+  secretRef?: string;
+};
+
+type AuditEntry = {
+  eventType: string;
+  leaseId?: string | null;
+  message: string;
+  metadata?: Record<string, unknown>;
+  source: AuditSource | null;
+  subjectRef?: string | null;
+  subjectType?: string;
+};
+
+function recordAudit(db: AuthoDatabase, entry: AuditEntry): void {
+  db.insertAudit({
+    createdAt: new Date().toISOString(),
+    eventType: entry.eventType,
+    id: randomId(),
+    leaseId: entry.leaseId ?? null,
+    message: entry.message,
+    metadata: JSON.stringify(entry.metadata ?? {}),
+    source: entry.source,
+    subjectRef: entry.subjectRef ?? null,
+    subjectType: entry.subjectType ?? "vault",
+  });
+}
+
+const DAY_MS = 86_400_000;
+
+/** Deletes audit events older than the auditRetentionDays preference; 0 keeps everything. */
+function pruneAuditLog(db: AuthoDatabase): void {
+  const days = numberPreference("auditRetentionDays");
+  if (days > 0) {
+    db.pruneAudit(new Date(Date.now() - days * DAY_MS).toISOString());
+  }
+}
+
+type UnlockMethod = "password" | "passkey" | "recovery";
+
+/** A failed unlock: records the method and the reason, never what was typed. */
+function recordFailedUnlock(db: AuthoDatabase, method: UnlockMethod, reason: string, source: AuditSource | null): void {
+  recordAudit(db, {
+    eventType: "auth.unlock.failed",
+    message: `Unlock with ${method} failed: ${reason}`,
+    metadata: { method, reason },
+    source,
+  });
+}
+
+/** Values resolved for env injection, and what they came from (for the audit log). */
+type InjectedEnv = {
+  env: Record<string, string>;
+  lease: LeaseState | null;
+  secrets: { envName: string; id: string; name: string }[];
 };
 
 export type EnvMapping = {
@@ -298,8 +374,10 @@ function toAuditEvent(row: AuditRow): AuditEvent {
     createdAt: row.createdAt,
     eventType: row.eventType,
     id: row.id,
+    leaseId: row.leaseId,
     message: row.message,
     metadata: JSON.parse(row.metadata) as Record<string, unknown>,
+    source: row.source as AuditSource | null,
     subjectRef: row.subjectRef,
     subjectType: row.subjectType,
   };
@@ -448,7 +526,7 @@ export function writeProjectConfig(input: {
 }
 
 export class VaultService {
-  static initialize(vaultPath: string, password: string): { vaultPath: string } {
+  static initialize(vaultPath: string, password: string, source: AuditSource | null = null): { vaultPath: string } {
     const db = new AuthoDatabase(vaultPath);
 
     try {
@@ -460,14 +538,11 @@ export class VaultService {
       db.immediateTransaction(() => {
         db.setVaultConfig(config);
         writeSeal(db, sealKey(rootKey));
-        db.insertAudit({
-          createdAt: new Date().toISOString(),
+        recordAudit(db, {
           eventType: "vault.initialized",
-          id: randomId(),
           message: "Vault initialized",
-          metadata: JSON.stringify({ version: config.version }),
-          subjectRef: null,
-          subjectType: "vault",
+          metadata: { version: config.version },
+          source,
         });
       });
       rootKey.fill(0);
@@ -518,10 +593,17 @@ export class VaultService {
     }
   }
 
-  static unlock(vaultPath: string, credentials: UnlockCredentials | string): VaultSession {
+  /**
+   * Opens a session. Failed attempts are always audited. `recordUnlock: false`
+   * skips the success event, for one-shot commands whose action is audited
+   * anyway and for admin checks that audit the change they make.
+   */
+  static unlock(vaultPath: string, credentials: UnlockCredentials | string, options?: { recordUnlock?: boolean }): VaultSession {
     const creds: UnlockCredentials = typeof credentials === "string"
       ? { password: credentials }
       : credentials;
+    const source = creds.source ?? null;
+    const recordUnlock = options?.recordUnlock ?? true;
 
     const db = new AuthoDatabase(vaultPath);
     const config = db.getVaultConfig();
@@ -531,30 +613,32 @@ export class VaultService {
     }
 
     const vaultAuth = db.getVaultAuth();
+    const fail = (method: UnlockMethod, reason: string, error?: unknown): never => {
+      recordFailedUnlock(db, method, reason, source);
+      db.close();
+      throw error instanceof Error && error.message === "Invalid or missing TOTP code"
+        ? error
+        : new Error(reason, { cause: error });
+    };
+    const opened = (rootKey: Buffer, entry: Omit<AuditEntry, "source">, sealBound = false): VaultSession => {
+      if (recordUnlock) recordAudit(db, { ...entry, source });
+      pruneAuditLog(db);
+      return new VaultSession(db, rootKey, { sealBound, sealRecord: creds.sealRecord, source });
+    };
 
     // Recovery path
     if (creds.recovery) {
       if (!vaultAuth?.recovery) {
-        db.close();
-        throw new Error("No recovery token configured for this vault");
+        return fail("recovery", "No recovery token configured for this vault");
       }
+      let rootKey: Buffer;
       try {
         const recoveryKEK = deriveKeyFromPassword(creds.recovery, vaultAuth.recovery.kdf);
-        const rootKey = decryptWithKey(vaultAuth.recovery.wrappedRootKey, recoveryKEK, "autho:vault-recovery");
-        db.insertAudit({
-          createdAt: new Date().toISOString(),
-          eventType: "auth.unlock.recovery",
-          id: randomId(),
-          message: "Vault unlocked via recovery file",
-          metadata: JSON.stringify({}),
-          subjectRef: null,
-          subjectType: "vault",
-        });
-        return new VaultSession(db, rootKey, { sealRecord: creds.sealRecord });
+        rootKey = decryptWithKey(vaultAuth.recovery.wrappedRootKey, recoveryKEK, "autho:vault-recovery");
       } catch (error) {
-        db.close();
-        throw new Error("Invalid recovery token", { cause: error });
+        return fail("recovery", "Invalid recovery token", error);
       }
+      return opened(rootKey, { eventType: "auth.unlock.recovery", message: "Vault unlocked via recovery file" });
     }
 
     // Passkey path: the authenticator's PRF output is the key material, and
@@ -562,45 +646,39 @@ export class VaultService {
     if (creds.passkey) {
       const passkey = vaultAuth?.passkeys?.find((p) => p.credentialId === creds.passkey!.credentialId);
       if (!passkey) {
-        db.close();
-        throw new Error("This passkey is not registered for this vault");
+        return fail("passkey", "This passkey is not registered for this vault");
       }
+      let rootKey: Buffer;
       try {
         const kek = passkeyKek(passkey.id, decodePrfOutput(creds.passkey.prfOutput));
-        const rootKey = decryptWithKey(passkey.wrappedRootKey, kek, passkeyAad(passkey.id));
-        db.insertAudit({
-          createdAt: new Date().toISOString(),
-          eventType: "auth.unlock.passkey",
-          id: randomId(),
-          message: "Vault unlocked with a passkey",
-          metadata: JSON.stringify({ label: passkey.label, passkeyId: passkey.id }),
-          subjectRef: passkey.id,
-          subjectType: "vault",
-        });
-        return new VaultSession(db, rootKey, { sealRecord: creds.sealRecord });
+        rootKey = decryptWithKey(passkey.wrappedRootKey, kek, passkeyAad(passkey.id));
       } catch (error) {
-        db.close();
-        throw new Error("Passkey did not unlock the vault", { cause: error });
+        return fail("passkey", "Passkey did not unlock the vault", error);
       }
+      return opened(rootKey, {
+        eventType: "auth.unlock.passkey",
+        message: `Vault unlocked with passkey ${passkey.label}`,
+        metadata: { label: passkey.label, passkeyId: passkey.id },
+        subjectRef: passkey.id,
+      });
     }
 
     // Password path
+    let unlocked: { rootKey: Buffer; sealBound: boolean };
     try {
       // The password KEK is derived once and reused for the TOTP check and the root key.
-      const { rootKey, sealBound } = unlockWithPassword(
+      unlocked = unlockWithPassword(
         db,
         creds.password,
         (passwordKEK) => checkVaultTotp(vaultAuth, passwordKEK, creds.totp),
         creds.sealRecord,
+        source,
       );
-      return new VaultSession(db, rootKey, { sealBound, sealRecord: creds.sealRecord });
     } catch (error) {
-      db.close();
-      if (error instanceof Error && error.message === "Invalid or missing TOTP code") {
-        throw error;
-      }
-      throw new Error("Invalid vault password", { cause: error });
+      const badTotp = error instanceof Error && error.message === "Invalid or missing TOTP code";
+      return fail("password", badTotp ? "Invalid or missing TOTP code" : "Invalid vault password", error);
     }
+    return opened(unlocked.rootKey, { eventType: "auth.unlock.password", message: "Vault unlocked with the master password" }, unlocked.sealBound);
   }
 
   static getAuthConfig(vaultPath: string): VaultAuth | null {
@@ -624,12 +702,12 @@ export class VaultService {
    * Callers must close() it; it holds the root key until then.
    */
   static authorize(vaultPath: string, credentials: UnlockCredentials): VaultAdmin {
-    const session = VaultService.unlock(vaultPath, credentials);
+    const session = VaultService.unlock(vaultPath, credentials, { recordUnlock: false });
     const rootKey = session.getRootKey();
     const sealBound = session.sealBound;
     session.close();
     const viaPassword = !credentials.passkey && !credentials.recovery;
-    return new VaultAdmin(vaultPath, rootKey, viaPassword ? credentials.password : null, sealBound, credentials.sealRecord);
+    return new VaultAdmin(vaultPath, rootKey, viaPassword ? credentials.password : null, sealBound, credentials.sealRecord, credentials.source ?? null);
   }
 
   /**
@@ -639,20 +717,32 @@ export class VaultService {
    */
   static unlockRootKey(
     vaultPath: string,
-    credentials: Pick<UnlockCredentials, "password" | "sealRecord" | "totp">,
+    credentials: Pick<UnlockCredentials, "password" | "sealRecord" | "source" | "totp">,
   ): { rootKey: Buffer; sealBound: boolean } {
     const db = new AuthoDatabase(vaultPath);
+    const source = credentials.source ?? null;
     try {
       if (!db.getVaultConfig()) {
         throw new Error(`Vault is not initialized at ${vaultPath}`);
       }
       const vaultAuth = db.getVaultAuth();
-      return unlockWithPassword(
-        db,
-        credentials.password,
-        (passwordKEK) => checkVaultTotp(vaultAuth, passwordKEK, credentials.totp),
-        credentials.sealRecord,
-      );
+      let unlocked: { rootKey: Buffer; sealBound: boolean };
+      try {
+        unlocked = unlockWithPassword(
+          db,
+          credentials.password,
+          (passwordKEK) => checkVaultTotp(vaultAuth, passwordKEK, credentials.totp),
+          credentials.sealRecord,
+          source,
+        );
+      } catch (error) {
+        const badTotp = error instanceof Error && error.message === "Invalid or missing TOTP code";
+        recordFailedUnlock(db, "password", badTotp ? "Invalid or missing TOTP code" : "Invalid vault password", source);
+        throw error;
+      }
+      recordAudit(db, { eventType: "auth.unlock.password", message: "Vault unlocked with the master password", source });
+      pruneAuditLog(db);
+      return unlocked;
     } finally {
       db.close();
     }
@@ -749,6 +839,7 @@ export class VaultAdmin {
     private readonly sealBound = false,
     /** Newest seal seen for this vault; updated as this handle re-signs it. */
     private record: SealRecord | null = null,
+    private readonly source: AuditSource | null = null,
   ) {}
 
   /** The seal as of this handle's last change, for the caller to save as the record. */
@@ -784,7 +875,7 @@ export class VaultAdmin {
         ...db.getVaultAuth(),
         totp: { algorithm: "SHA1", digits: 6, encryptedSecret, period: 30 },
       });
-      audit(db, "auth.totp.enabled", "TOTP vault unlock enabled");
+      this.audit(db, "auth.totp.enabled", "TOTP vault unlock enabled");
     });
   }
 
@@ -795,7 +886,7 @@ export class VaultAdmin {
         const { totp: _removed, ...rest } = existing;
         db.setVaultAuth({ ...rest, version: 1 });
       }
-      audit(db, "auth.totp.removed", "TOTP vault unlock removed");
+      this.audit(db, "auth.totp.removed", "TOTP vault unlock removed");
     });
   }
 
@@ -818,7 +909,7 @@ export class VaultAdmin {
         db.setVaultAuth({ ...auth, version: 1, totp: { ...auth.totp, encryptedSecret: encryptWithKey(secret, newKEK, "autho:vault-totp") } });
       }
       db.setVaultConfig(config);
-      audit(db, "auth.password.changed", "Master password changed");
+      this.audit(db, "auth.password.changed", "Master password changed");
     });
     this.password = newPassword;
   }
@@ -840,7 +931,7 @@ export class VaultAdmin {
         ...db.getVaultAuth(),
         recovery: { createdAt: new Date().toISOString(), kdf: recoveryKdf, wrappedRootKey },
       });
-      audit(db, "auth.recovery.generated", "Recovery file generated");
+      this.audit(db, "auth.recovery.generated", "Recovery file generated");
       return { fileContent: recoveryFileContent(this.vaultPath, token) };
     });
   }
@@ -852,7 +943,7 @@ export class VaultAdmin {
         const { recovery: _removed, ...rest } = existing;
         db.setVaultAuth({ ...rest, version: 1 });
       }
-      audit(db, "auth.recovery.revoked", "Recovery file revoked");
+      this.audit(db, "auth.recovery.revoked", "Recovery file revoked");
     });
   }
 
@@ -879,7 +970,7 @@ export class VaultAdmin {
         wrappedRootKey: encryptWithKey(this.liveRootKey(), passkeyKek(id, prfOutput), passkeyAad(id)),
       };
       db.setVaultAuth({ version: 1, ...existing, passkeys: [...passkeys, draft] });
-      audit(db, "auth.passkey.added", "Passkey added", { label, passkeyId: id }, id);
+      this.audit(db, "auth.passkey.added", "Passkey added", { label, passkeyId: id }, id);
       const { wrappedRootKey: _key, ...info } = draft;
       return info;
     });
@@ -898,7 +989,7 @@ export class VaultAdmin {
       }
       const removed = matches[0]!;
       db.setVaultAuth({ ...existing!, version: 1, passkeys: passkeys.filter((p) => p !== removed) });
-      audit(db, "auth.passkey.removed", "Passkey removed", { label: removed.label, passkeyId: removed.id }, removed.id);
+      this.audit(db, "auth.passkey.removed", "Passkey removed", { label: removed.label, passkeyId: removed.id }, removed.id);
       const { wrappedRootKey: _key, ...info } = removed;
       return info;
     });
@@ -974,7 +1065,7 @@ export class VaultAdmin {
 
         result.sealRecord = writeSeal(db, key, { minCounter: this.record ? this.record.counter + 1 : 0 });
         this.record = result.sealRecord;
-        audit(db, `vault.reseal.${mode}`, mode === "accept" ? "Vault re-sealed as is" : "Vault re-sealed after quarantine", {
+        this.audit(db, `vault.reseal.${mode}`, mode === "accept" ? "Vault re-sealed as is" : "Vault re-sealed after quarantine", {
           changes: result.changes.slice(0, 200),
           diffTrusted: result.diffTrusted,
           kept: result.kept.length,
@@ -995,6 +1086,10 @@ export class VaultAdmin {
    * first and re-signs it after. `sealed` tells `fn` whether the vault
    * carries a seal (false for a vault from before sealing).
    */
+  private audit(db: AuthoDatabase, eventType: string, message: string, metadata: Record<string, unknown> = {}, subjectRef: string | null = null): void {
+    recordAudit(db, { eventType, message, metadata, source: this.source, subjectRef });
+  }
+
   private write<T>(fn: (db: AuthoDatabase, sealed: boolean) => T): T {
     const key = sealKey(this.liveRootKey());
     const db = new AuthoDatabase(this.vaultPath);
@@ -1069,18 +1164,6 @@ function quarantineChanges(
   return { kept, undone };
 }
 
-function audit(db: AuthoDatabase, eventType: string, message: string, metadata: Record<string, unknown> = {}, subjectRef: string | null = null): void {
-  db.insertAudit({
-    createdAt: new Date().toISOString(),
-    eventType,
-    id: randomId(),
-    message,
-    metadata: JSON.stringify(metadata),
-    subjectRef,
-    subjectType: "vault",
-  });
-}
-
 function recoveryFileContent(vaultPath: string, token: string): string {
   const formattedToken = token.toUpperCase().match(/.{1,8}/g)!.join("-");
   return [
@@ -1119,15 +1202,18 @@ export class VaultSession {
   readonly sealBound: boolean;
   /** Newest seal seen for this vault (from the OS keychain), to catch an older copy of the file. */
   private readonly sealRecord: SealRecord | null;
+  /** Stamped on every audit event this session records. */
+  readonly source: AuditSource | null;
 
   constructor(
     private readonly db: AuthoDatabase,
     private readonly rootKey: Buffer,
-    options: { sealBound?: boolean; sealRecord?: SealRecord | null } = {},
+    options: { sealBound?: boolean; sealRecord?: SealRecord | null; source?: AuditSource | null } = {},
   ) {
     this.sealKey = sealKey(rootKey);
     this.sealBound = options.sealBound ?? false;
     this.sealRecord = options.sealRecord ?? null;
+    this.source = options.source ?? null;
   }
 
   /**
@@ -1207,16 +1293,9 @@ export class VaultSession {
     subjectRef: string | null,
     message: string,
     metadata: Record<string, unknown>,
+    leaseId: string | null = null,
   ): void {
-    this.db.insertAudit({
-      createdAt: new Date().toISOString(),
-      eventType,
-      id: randomId(),
-      message,
-      metadata: JSON.stringify(metadata),
-      subjectRef,
-      subjectType,
-    });
+    recordAudit(this.db, { eventType, leaseId, message, metadata, source: this.source, subjectRef, subjectType });
   }
 
   private unwrapSecret(row: SecretRow): SecretRecord {
@@ -1338,8 +1417,9 @@ export class VaultSession {
       updatedAt: now,
       wrappedKey: JSON.stringify(wrappedKey),
     });
-    this.audit("secret.created", "secret", id, "Secret created", {
+    this.audit("secret.created", "secret", id, `Created ${input.name}`, {
       metadataKeyCount: Object.keys(normalizeMetadata(input.metadata)).length,
+      name: input.name,
       type,
     });
 
@@ -1409,8 +1489,11 @@ export class VaultSession {
       updatedAt: now,
     });
 
-    this.audit("secret.updated", "secret", existing.id, "Secret updated", {
+    const renamed = newName !== existing.name;
+    this.audit("secret.updated", "secret", existing.id, renamed ? `Updated ${existing.name}, renamed to ${newName}` : `Updated ${newName}`, {
       fields: Object.keys(updates).filter((k) => (updates as Record<string, unknown>)[k] !== undefined),
+      name: newName,
+      ...(renamed ? { previousName: existing.name } : {}),
     });
 
     return {
@@ -1462,7 +1545,7 @@ export class VaultSession {
       imported += 1;
     }
 
-    this.audit("import.legacy", "vault", null, "Legacy backup imported", {
+    this.audit("import.legacy", "vault", null, `Imported ${imported} secrets from a legacy backup`, {
       imported,
       skipped,
     });
@@ -1483,7 +1566,8 @@ export class VaultSession {
   /**
    * Decrypts every secret but returns only display fields (username, url,
    * description), so list UIs can search without holding values in memory.
-   * Audited once per call instead of once per secret.
+   * Not audited: listing names isn't access to a secret, and list views
+   * refresh often enough to drown out real events.
    */
   listSecretIndex(): SecretIndexEntry[] {
     const linkCounts = new Map<string, number>();
@@ -1505,18 +1589,23 @@ export class VaultSession {
         username: secret.username,
       };
     });
-    this.audit("secret.index", "vault", null, "Secret index listed", { count: entries.length });
     return entries;
   }
 
   getSecret(ref: string): SecretRecord {
     const secret = this.getSecretOrThrow(ref);
-    this.audit("secret.read", "secret", secret.id, "Secret read", {
+    this.audit("secret.read", "secret", secret.id, `Read ${secret.name}`, {
       metadataKeyCount: Object.keys(secret.metadata).length,
+      name: secret.name,
       type: secret.type,
     });
 
     return secret;
+  }
+
+  /** A secret's fields with the value left empty, e.g. to fill an edit form. Not audited: no value leaves the vault. */
+  describeSecret(ref: string): SecretRecord {
+    return { ...this.getSecretOrThrow(ref), value: "" };
   }
 
   /**
@@ -1541,9 +1630,10 @@ export class VaultSession {
         }
       }
 
-      for (const target of [{ id: secret.id, type: secret.type }, ...removedLinked]) {
+      for (const target of [{ id: secret.id, name: secret.name, type: secret.type }, ...removedLinked]) {
         this.db.deleteSecret(target.id);
-        this.audit("secret.deleted", "secret", target.id, "Secret deleted", {
+        this.audit("secret.deleted", "secret", target.id, `Deleted ${target.name}`, {
+          name: target.name,
           type: target.type,
           ...(target.id === secret.id ? {} : { withPrimary: secret.id }),
         });
@@ -1619,8 +1709,9 @@ export class VaultSession {
 
     const result = this.otpCode(secret);
     if (options?.audit ?? true) {
-      this.audit("otp.generated", "secret", secret.id, "OTP code generated", {
+      this.audit("otp.generated", "secret", secret.id, `OTP code for ${secret.name}`, {
         expiresAt: result.expiresAt,
+        name: secret.name,
       });
     }
 
@@ -1702,11 +1793,13 @@ export class VaultSession {
       revokedAt: lease.revokedAt,
       secretRefs: JSON.stringify(lease.secretRefs),
     });
-    this.audit("lease.created", "lease", lease.id, "Lease created", {
+    this.audit("lease.created", "lease", lease.id, `Lease ${lease.name} created for ${resolved.length} secret${resolved.length === 1 ? "" : "s"}`, {
       expiresAt,
       includeLinks: lease.includeLinks,
+      leaseName: lease.name,
       secretCount: lease.secretRefs.length,
-    });
+      secrets: resolved.map((secret) => ({ id: secret.id, name: secret.name })),
+    }, lease.id);
 
     return lease;
   }
@@ -1723,9 +1816,10 @@ export class VaultSession {
         const lease = this.getLeaseOrThrow(id);
         const revokedAt = new Date().toISOString();
         this.db.revokeLease(id, revokedAt);
-        this.audit("lease.revoked", "lease", id, "Lease revoked", {
+        this.audit("lease.revoked", "lease", id, `Lease ${lease.name} revoked`, {
           id,
-        });
+          leaseName: lease.name,
+        }, id);
 
         return {
           ...lease,
@@ -1744,7 +1838,7 @@ export class VaultSession {
   private buildEnv(
     mappings: EnvMapping[],
     leaseId?: string,
-  ): Record<string, string> {
+  ): InjectedEnv {
     if (mappings.length === 0) {
       throw new Error("Provide at least one env mapping");
     }
@@ -1752,32 +1846,48 @@ export class VaultSession {
     return this.db.immediateTransaction(() => {
       this.requireIntactSeal();
       const lease = leaseId ? this.getActiveLeaseOrThrow(leaseId) : null;
-      const output: Record<string, string> = {};
+      const env: Record<string, string> = {};
+      const secrets: InjectedEnv["secrets"] = [];
       for (const mapping of mappings) {
         const secret = this.getSecretOrThrow(mapping.secretRef);
         if (lease) {
           const { via } = this.leaseAccess(lease, secret);
           if (via) {
-            this.audit("lease.link_access", "secret", secret.id, `Secret read via link from ${via.name}`, {
+            this.audit("lease.link_access", "secret", secret.id, `Lease ${lease.name} read ${secret.name} via link from ${via.name}`, {
               leaseId: lease.id,
+              leaseName: lease.name,
+              name: secret.name,
               primaryId: via.id,
-            });
+            }, lease.id);
           }
         }
-        output[mapping.envName] = secret.type === "otp" ? this.otpCode(secret).code : secret.value;
+        env[mapping.envName] = secret.type === "otp" ? this.otpCode(secret).code : secret.value;
+        secrets.push({ envName: mapping.envName, id: secret.id, name: secret.name });
       }
-      return output;
+      return { env, lease, secrets };
     });
   }
 
-  renderEnv(mappings: EnvMapping[], leaseId?: string): Record<string, string> {
-    const env = this.buildEnv(mappings, leaseId);
-    this.audit("env.rendered", "lease", leaseId ?? null, "Environment rendered", {
-      leaseId: leaseId ?? null,
-      varCount: Object.keys(env).length,
-    });
+  /** Who, what and through which lease, for the env and exec audit events. Never values. */
+  private injectionAudit(injected: InjectedEnv): { message: string; metadata: Record<string, unknown> } {
+    const names = injected.secrets.map((secret) => secret.name).join(", ");
+    return {
+      message: injected.lease ? `${names} via lease ${injected.lease.name}` : names,
+      metadata: {
+        leaseId: injected.lease?.id ?? null,
+        leaseName: injected.lease?.name ?? null,
+        secrets: injected.secrets,
+        varCount: injected.secrets.length,
+      },
+    };
+  }
 
-    return env;
+  renderEnv(mappings: EnvMapping[], leaseId?: string): Record<string, string> {
+    const injected = this.buildEnv(mappings, leaseId);
+    const { message, metadata } = this.injectionAudit(injected);
+    this.audit("env.rendered", "lease", injected.lease?.id ?? null, `Environment rendered: ${message}`, metadata, injected.lease?.id ?? null);
+
+    return injected.env;
   }
 
   syncEnvFile(input: {
@@ -1787,7 +1897,8 @@ export class VaultSession {
     outputPath: string;
     ttlSeconds?: number;
   }): { expiresAt: string | null; outputPath: string; varCount: number } {
-    const env = this.buildEnv(input.mappings, input.leaseId);
+    const injected = this.buildEnv(input.mappings, input.leaseId);
+    const env = injected.env;
     if (!input.force && existsSync(input.outputPath)) {
       throw new Error(`Env file already exists: ${input.outputPath}`);
     }
@@ -1805,11 +1916,11 @@ export class VaultSession {
     ];
 
     writeTextFileSecure(input.outputPath, lines.join("\n"));
-    this.audit("env.synced", "lease", input.leaseId ?? null, "Environment file written", {
+    const { message, metadata } = this.injectionAudit(injected);
+    this.audit("env.synced", "lease", injected.lease?.id ?? null, `Env file ${basename(input.outputPath)} written: ${message}`, {
+      ...metadata,
       expiresAt,
-      leaseId: input.leaseId ?? null,
-      varCount: Object.keys(env).length,
-    });
+    }, injected.lease?.id ?? null);
 
     return {
       expiresAt,
@@ -1831,21 +1942,23 @@ export class VaultSession {
       throw new Error("Missing command after --");
     }
 
-    const injectedEnv = this.buildEnv(input.mappings, input.leaseId);
+    const injected = this.buildEnv(input.mappings, input.leaseId);
     const result = spawnSync(input.cmd[0], input.cmd.slice(1), {
       env: {
         ...process.env,
-        ...injectedEnv,
+        ...injected.env,
       },
       stdio: "pipe",
     });
 
-    this.audit("exec.run", "lease", input.leaseId ?? null, "Injected command executed", {
-      ...summarizeCommand(input.cmd),
-      envCount: Object.keys(injectedEnv).length,
+    const { message, metadata } = this.injectionAudit(injected);
+    const command = summarizeCommand(input.cmd);
+    this.audit("exec.run", "lease", injected.lease?.id ?? null, `Ran ${command.executable} with ${message}`, {
+      ...command,
+      ...metadata,
+      envCount: injected.secrets.length,
       exitCode: result.status ?? 1,
-      leaseId: input.leaseId ?? null,
-    });
+    }, injected.lease?.id ?? null);
 
     return {
       exitCode: result.status ?? 1,
@@ -1928,8 +2041,29 @@ export class VaultSession {
     return result;
   }
 
-  listAudit(limit = 50): AuditEvent[] {
-    return this.db.listAudit(limit).map(toAuditEvent);
+  /** Newest first. `secretRef` and `leaseRef` take an id or a name. */
+  listAudit(query: AuditQuery = {}): AuditEvent[] {
+    const secretId = query.secretRef ? (this.db.findSecret(query.secretRef)?.id ?? query.secretRef) : undefined;
+    return this.db
+      .listAudit({
+        eventType: query.eventType,
+        leaseId: query.leaseRef ? this.resolveLeaseId(query.leaseRef) : undefined,
+        limit: Math.min(1000, Math.max(1, Math.floor(query.limit ?? 50) || 50)),
+        secretId,
+        source: query.source,
+      })
+      .map(toAuditEvent);
+  }
+
+  /** A lease id, or the id of the one lease with that name. Unknown refs pass through, so events of a deleted lease still match. */
+  private resolveLeaseId(ref: string): string {
+    const leases = this.db.listLeases(1000);
+    if (leases.some((lease) => lease.id === ref)) return ref;
+    const named = leases.filter((lease) => lease.name === ref);
+    if (named.length > 1) {
+      throw new Error(`${named.length} leases are named ${ref}; use the lease id`);
+    }
+    return named[0]?.id ?? ref;
   }
 }
 

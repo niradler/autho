@@ -411,6 +411,19 @@ describe("autho rewrite CLI", () => {
         "lease.revoked",
       ]),
     );
+    expect(audit.every((event) => (event as { source?: string }).source === "cli")).toBe(true);
+    // One-shot commands log what they did, not an unlock before each one.
+    expect(audit.some((event) => event.eventType.startsWith("auth.unlock"))).toBe(false);
+
+    const leaseEvents = runCliJson([
+      "audit", "list", "--vault", vaultPath, "--password", password, "--lease", lease.id, "--source", "cli",
+    ]) as Array<{ eventType: string; leaseId: string | null }>;
+    expect(leaseEvents.length).toBeGreaterThan(0);
+    expect(leaseEvents.every((event) => event.leaseId === lease.id)).toBe(true);
+
+    const badSource = runCli(["audit", "list", "--vault", vaultPath, "--password", password, "--source", "phone"]);
+    expect(badSource.exitCode).toBe(1);
+    expect(badSource.stderr).toContain("Unknown --source");
 
     const remove = runCliJson([
       "secrets",

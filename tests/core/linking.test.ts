@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 function auditTypes(): string[] {
-  return session.listAudit(200).map((event) => event.eventType);
+  return session.listAudit({ limit: 200 }).map((event) => event.eventType);
 }
 
 test("link shows the secret under the primary, and the primary on the linked secret", () => {

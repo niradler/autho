@@ -112,10 +112,24 @@ export type AuditRow = {
   createdAt: string;
   eventType: string;
   id: string;
+  /** The lease the access went through, when there was one. */
+  leaseId: string | null;
   message: string;
   metadata: string;
+  /** The interface that made the change: cli, tui, web or daemon. Null on events from before sources were recorded. */
+  source: string | null;
   subjectRef: string | null;
   subjectType: string;
+};
+
+/** Narrows an audit listing; `eventType` matches a prefix, so "secret." finds every secret event. */
+export type AuditFilter = {
+  eventType?: string;
+  leaseId?: string;
+  limit: number;
+  /** Matches events about the secret and env/exec/lease events that list it. */
+  secretId?: string;
+  source?: string;
 };
 
 function parseJson<T>(value: string): T {
@@ -244,6 +258,14 @@ export class AuthoDatabase {
     if (!sealRowColumns.some((column) => column.name === "row_json")) {
       this.db.exec("ALTER TABLE seal_rows ADD COLUMN row_json TEXT");
     }
+    const auditColumns = this.db.query("PRAGMA table_info(audit_events)").all() as { name: string }[];
+    if (!auditColumns.some((column) => column.name === "source")) {
+      this.db.exec("ALTER TABLE audit_events ADD COLUMN source TEXT");
+    }
+    if (!auditColumns.some((column) => column.name === "lease_id")) {
+      this.db.exec("ALTER TABLE audit_events ADD COLUMN lease_id TEXT");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS audit_events_created_at ON audit_events (created_at)");
   }
 
   getVaultConfig(): VaultConfig | null {
@@ -560,8 +582,8 @@ export class AuthoDatabase {
   insertAudit(event: AuditRow): void {
     this.db
       .query(
-        `INSERT INTO audit_events (id, event_type, subject_type, subject_ref, message, metadata, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+        `INSERT INTO audit_events (id, event_type, subject_type, subject_ref, message, metadata, created_at, source, lease_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
       )
       .run(
         event.id,
@@ -571,10 +593,31 @@ export class AuthoDatabase {
         event.message,
         event.metadata,
         event.createdAt,
+        event.source,
+        event.leaseId,
       );
   }
 
-  listAudit(limit: number): AuditRow[] {
+  listAudit(filter: AuditFilter): AuditRow[] {
+    const conditions: string[] = [];
+    const values: string[] = [];
+    if (filter.source) {
+      values.push(filter.source);
+      conditions.push(`source = ?${values.length}`);
+    }
+    if (filter.eventType) {
+      values.push(`${filter.eventType.replace(/[\\%_]/g, "\\$&")}%`);
+      conditions.push(`event_type LIKE ?${values.length} ESCAPE '\\'`);
+    }
+    if (filter.leaseId) {
+      values.push(filter.leaseId);
+      conditions.push(`lease_id = ?${values.length}`);
+    }
+    if (filter.secretId) {
+      values.push(filter.secretId, `%"id":"${filter.secretId.replace(/[\\%_"]/g, "")}"%`);
+      conditions.push(`(subject_ref = ?${values.length - 1} OR metadata LIKE ?${values.length})`);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     return this.db
       .query(
         `SELECT
@@ -584,11 +627,19 @@ export class AuthoDatabase {
            subject_ref AS subjectRef,
            message,
            metadata,
+           source,
+           lease_id AS leaseId,
            created_at AS createdAt
          FROM audit_events
+         ${where}
          ORDER BY created_at DESC
-         LIMIT ?1`,
+         LIMIT ?${values.length + 1}`,
       )
-      .all(limit) as AuditRow[];
+      .all(...values, filter.limit) as AuditRow[];
+  }
+
+  /** Deletes audit events older than `beforeIso`; returns how many went. */
+  pruneAudit(beforeIso: string): number {
+    return this.db.query("DELETE FROM audit_events WHERE created_at < ?1").run(beforeIso).changes;
   }
 }

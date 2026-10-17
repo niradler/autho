@@ -232,6 +232,7 @@ export function unlockWithPassword(
   password: string,
   beforeUnwrap?: (passwordKey: Buffer) => void,
   record?: SealRecord | null,
+  source: string | null = null,
 ): { rootKey: Buffer; sealBound: boolean } {
   const config = db.getVaultConfig();
   if (!config) {
@@ -257,8 +258,10 @@ export function unlockWithPassword(
       createdAt: new Date().toISOString(),
       eventType: "vault.sealed.initial",
       id: randomId(),
+      leaseId: null,
       message: "Vault sealed for the first time",
       metadata: JSON.stringify({}),
+      source,
       subjectRef: null,
       subjectType: "vault",
     });

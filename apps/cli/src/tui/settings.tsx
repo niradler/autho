@@ -54,7 +54,8 @@ enum Section {
 const SECTIONS: Section[] = [Section.Storage, Section.Security, Section.Behaviour, Section.Agents, Section.About];
 
 const BEHAVIOUR_KEYS: PreferenceKey[] = ["revealSeconds", "clipboardClearSeconds", "idleLockSeconds", "passwordLength", "passwordSymbols", "mouse"];
-const AGENT_KEYS: PreferenceKey[] = ["defaultLeaseTtl", "daemonTtlSeconds", "webPort", "webWithTui"];
+const AGENT_KEYS: PreferenceKey[] = ["defaultLeaseTtl", "daemonTtlSeconds", "webPort", "webWithTui", "auditRetentionDays"];
+const UNIT_NAMES: Record<string, string> = { s: "Seconds", d: "Days" };
 
 /** The web UI the TUI serves alongside itself: its address, or why there is none. */
 export type WebStatus = { url: string | null; note: string };
@@ -366,7 +367,7 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
         if (!first) return;
         if (status?.totp && field === 0) { setField(1); return; }
         try {
-          admin.current = VaultService.authorize(vaultPath, { password: first, sealRecord: sealRecord.current, totp: status?.totp ? second : undefined });
+          admin.current = VaultService.authorize(vaultPath, { password: first, sealRecord: sealRecord.current, totp: status?.totp ? second : undefined, source: "tui" });
         } catch (e) {
           setError(message(e));
           writeFields(["", ""]);
@@ -631,7 +632,7 @@ function DialogPanel({ dialog, totp, fields, field, focused, error, onChange, on
     case "number": {
       const spec = PREFERENCES.find((p) => p.key === dialog.key)!;
       title = spec.label;
-      body = <>{text(spec.kind === "number" && spec.unit === "s" ? "Seconds" : "Value", "empty = default")}<text fg={theme.dim}>{spec.kind === "number" ? `${spec.min}–${spec.max}${spec.zero ? ` · 0 = ${spec.zero}` : ""} · empty resets to ${spec.default}` : ""}</text></>;
+      body = <>{text((spec.kind === "number" && spec.unit && UNIT_NAMES[spec.unit]) || "Value", "empty = default")}<text fg={theme.dim}>{spec.kind === "number" ? `${spec.min}–${spec.max}${spec.zero ? ` · 0 = ${spec.zero}` : ""} · empty resets to ${spec.default}` : ""}</text></>;
       break;
     }
     case "vaultDir":

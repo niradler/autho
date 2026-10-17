@@ -173,6 +173,7 @@ async function openSessionFromRootKey(session: DaemonSession): Promise<VaultSess
   return new VaultSession(new AuthoDatabase(session.vaultPath), session.rootKey, {
     sealBound: session.sealBound,
     sealRecord: await loadSealRecord(session.vaultPath),
+    source: "daemon",
   });
 }
 
@@ -296,6 +297,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
           const { rootKey, sealBound } = VaultService.unlockRootKey(options.vaultPath, {
             password: body.password,
             sealRecord: await loadSealRecord(options.vaultPath),
+            source: "daemon",
             totp: body.totp,
           });
           const sessionId = randomId();

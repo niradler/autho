@@ -25,7 +25,8 @@ const SECTIONS = [
 type SectionId = (typeof SECTIONS)[number]["id"];
 
 const BEHAVIOUR_KEYS = ["revealSeconds", "clipboardClearSeconds", "idleLockSeconds", "passwordLength", "passwordSymbols", "mouse"];
-const AGENT_KEYS = ["defaultLeaseTtl", "daemonTtlSeconds", "webPort", "webWithTui"];
+const AGENT_KEYS = ["defaultLeaseTtl", "daemonTtlSeconds", "webPort", "webWithTui", "auditRetentionDays"];
+const UNIT_NAMES: Record<string, string> = { s: "Seconds", d: "Days" };
 
 type SettingsDialog =
   | { kind: "number"; pref: PreferenceRow }
@@ -427,11 +428,12 @@ function NumberDialog({ pref, onSave }: { pref: PreferenceRow; onSave: (value: n
     if (pref.max !== undefined && value > pref.max) return setError(`At most ${pref.max}`);
     void onSave(value);
   };
-  const hint = [pref.unit === "s" ? "In seconds" : null, pref.zero ? `0 = ${pref.zero}` : null, `default ${String(pref.default)}`].filter(Boolean).join(" · ");
+  const unitName = UNIT_NAMES[pref.unit ?? ""];
+  const hint = [unitName ? `In ${unitName.toLowerCase()}` : null, pref.zero ? `0 = ${pref.zero}` : null, `default ${String(pref.default)}`].filter(Boolean).join(" · ");
   return (
     <DialogContent title={pref.label} description={pref.help}>
       <form onSubmit={submit}>
-        <Field label={pref.unit === "s" ? "Seconds" : "Value"} htmlFor="pref-value" hint={hint} error={error}>
+        <Field label={unitName ?? "Value"} htmlFor="pref-value" hint={hint} error={error}>
           <Input id="pref-value" autoFocus inputMode="numeric" value={text} onChange={(e) => { setText(e.target.value); setError(""); }} className="font-mono" />
         </Field>
         <DialogFooter><Button type="submit" variant="primary">Save</Button></DialogFooter>

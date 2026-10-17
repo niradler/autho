@@ -200,9 +200,8 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
     const current = sessionRef.current;
     if (!current) return;
     try {
-      // The form loads the stored value only on Ctrl+R; drop it here.
-      const record = current.getSecret(id);
-      setRoute({ name: "form", editing: { ...record, value: "" } });
+      // The form loads the stored value only on Ctrl+R, so opening it is not a read.
+      setRoute({ name: "form", editing: current.describeSecret(id) });
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
     }

@@ -47,6 +47,7 @@ Or download a standalone binary for macOS, Linux or Windows from [GitHub Release
 - Passkeys and security keys wrap the root key with a key derived (HKDF-SHA256) from the authenticator's PRF output; the PRF value is never stored, and user verification (biometric or PIN) is required
 - Copied secrets are cleared from the clipboard after 30 seconds, only if the clipboard still holds them — also after the TUI exits
 - Audit events record access patterns without storing secret values
+- Each audit event records where it happened (`cli`, `tui`, `web`, `daemon`) and the lease it went through, if any. Failed unlocks are logged with the method used, never the input. Events older than `auditRetentionDays` (default 90, `0` keeps them forever) are deleted on unlock
 - The vault is **sealed**: an HMAC (keyed from the root key) covers secrets, links, leases and settings. Any change made without the key stops `env`, `exec` and lease reads until `autho vault reseal`; revoking a lease always works
 - `env` and `exec` inject an OTP secret's current code, never its seed
 - Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
@@ -188,7 +189,7 @@ Press `5` in the TUI (or pick Settings in the palette) for one page with everyth
 | Storage | See and copy the vault, config, project and daemon paths; point autho at another vault folder |
 | Security | Change the master password, remember it in the OS keychain, set a PIN, turn two-factor codes on or off, add or remove passkeys and security keys, create or revoke the recovery file |
 | Behaviour | Reveal timeout, clipboard clear, auto-lock, generated password length and symbols, mouse |
-| Agents & services | Default lease TTL, daemon session TTL, web UI port, web UI with the TUI (and its address) |
+| Agents & services | Default lease TTL, daemon session TTL, web UI port, web UI with the TUI (and its address), audit retention |
 | About | Version, runtime, OS secret store |
 
 Security changes ask for the master password (and two-factor code) once per visit; the handle is dropped when you leave Settings. Changing the vault folder only changes the setting — move `vault.db` yourself, then restart autho.
@@ -202,7 +203,7 @@ autho config unset revealSeconds      # back to the default
 autho password change                 # prompts; or --new-password / AUTHO_NEW_MASTER_PASSWORD
 ```
 
-Environment variables still win over `config.json`: `AUTHO_TUI_REVEAL_SECONDS`, `AUTHO_CLIPBOARD_CLEAR_SECONDS`, `AUTHO_TUI_LOCK_SECONDS` (`0` disables a timer). `autho config show` names the variable when one is in effect.
+Environment variables still win over `config.json`: `AUTHO_TUI_REVEAL_SECONDS`, `AUTHO_CLIPBOARD_CLEAR_SECONDS`, `AUTHO_TUI_LOCK_SECONDS` (`0` disables a timer), `AUTHO_AUDIT_RETENTION_DAYS`. `autho config show` names the variable when one is in effect.
 
 ## Passkeys And Security Keys
 
@@ -324,6 +325,15 @@ autho secrets get --ref github --links
 autho lease show --lease <id>
 autho unlink github github-otp
 autho secrets rm --ref github --with-linked   # also delete linked secrets no other secret links to
+```
+
+The audit log shows what was read, changed, injected and by which interface:
+
+```bash
+autho audit list --source web             # only what the web UI did
+autho audit list --lease <id-or-name>     # everything done through a lease
+autho audit list --secret github          # reads, edits, leases and env/exec runs that used github
+autho audit list --type secret. --limit 200
 ```
 
 If the vault file is edited outside autho, `env`, `exec` and writes stop with an error:

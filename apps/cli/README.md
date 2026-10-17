@@ -45,7 +45,7 @@ You can also set `AUTHO_MASTER_PASSWORD` to avoid passing `--password` on every 
 - **Env injection** — render secrets as env vars, write `.env` files, or inject into subprocesses
 - **Project mappings** — define `ENV_NAME=secretRef` maps in a project config file
 - **Leases** — time-limited, revocable access tokens scoped to specific secrets
-- **Audit trail** — every vault operation is logged with timestamps and metadata
+- **Audit trail** — reads, edits, env/exec injections and unlocks are logged with their source (cli, tui, web, daemon) and lease; old events are pruned after 90 days by default (`auditRetentionDays`)
 - **Legacy import** — migrate from JSON backup files
 - **Interactive mode** — run `autho` with no arguments for a guided prompt
 - **Local daemon** — unlock once, run many commands without re-entering your password
@@ -71,7 +71,7 @@ autho file decrypt --password <value> --input <path> [--output <path>] [--force]
 autho files encrypt --password <value> --input <path> [--output <path>] [--force] [--json]
 autho files decrypt --password <value> --input <path> [--output <path>] [--force] [--json]
 autho import legacy --password <value> --file <path> [--no-skip-existing] [--json]
-autho audit list --password <value> [--limit <number>] [--json]
+autho audit list --password <value> [--limit <number>] [--source cli|tui|web|daemon] [--type <prefix>] [--secret <ref>] [--lease <ref>] [--json]
 autho project init --map <ENV=ref> [--output <path>] [--force] [--json]
 autho web serve [--vault <path>] [--port <value>]
 autho daemon serve [--vault <path>] [--port <value>]

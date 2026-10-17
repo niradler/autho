@@ -111,7 +111,7 @@ test("one admin handle runs several changes and is unusable after close", () => 
 
   const session = VaultService.unlock(vaultPath, NEW_PASSWORD);
   try {
-    const events = session.listAudit(50).map((e) => e.eventType);
+    const events = session.listAudit({ limit: 50 }).map((e) => e.eventType);
     expect(events).toContain("auth.password.changed");
   } finally {
     session.close();

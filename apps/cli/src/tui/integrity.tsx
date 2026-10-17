@@ -103,7 +103,7 @@ export function IntegrityScreen({ session, vaultPath, setHints }: { session: Vau
     setTimeout(() => {
       void (async () => {
         try {
-          const admin = VaultService.authorize(vaultPath, { password: pw, sealRecord: await loadSealRecord(vaultPath), totp: needsTotp ? code : undefined });
+          const admin = VaultService.authorize(vaultPath, { password: pw, sealRecord: await loadSealRecord(vaultPath), totp: needsTotp ? code : undefined, source: "tui" });
           try {
             const { sealRecord, ...rest } = admin.reseal(pending.mode);
             await saveSealRecord(vaultPath, sealRecord);

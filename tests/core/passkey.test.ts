@@ -48,7 +48,7 @@ test("a registered passkey unlocks the vault and is audited", () => {
   const session = VaultService.unlock(vaultPath, { password: "", passkey: { credentialId, prfOutput } });
   try {
     expect(session.getSecret("github").value).toBe("hunter2");
-    const events = session.listAudit(50).map((e) => e.eventType);
+    const events = session.listAudit({ limit: 50 }).map((e) => e.eventType);
     expect(events).toContain("auth.passkey.added");
     expect(events).toContain("auth.unlock.passkey");
   } finally {
@@ -91,7 +91,7 @@ test("list exposes public details only and remove revokes access", () => {
 
   const session = VaultService.unlock(vaultPath, PASSWORD);
   try {
-    expect(session.listAudit(50).map((e) => e.eventType)).toContain("auth.passkey.removed");
+    expect(session.listAudit({ limit: 50 }).map((e) => e.eventType)).toContain("auth.passkey.removed");
   } finally {
     session.close();
   }

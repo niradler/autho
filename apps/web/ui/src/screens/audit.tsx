@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Button } from "../components/ui/button.tsx";
 import { Empty, Panel, Spinner } from "../components/ui/panel.tsx";
 import { useApp, useScreen, type Command, type KeyHint } from "../context.tsx";
-import { api, errorMessage, type AuditEvent } from "../lib/api.ts";
+import { AUDIT_SOURCES, api, errorMessage, type AuditEvent } from "../lib/api.ts";
 import { cn, formatDate, fuzzyFilter, isTypingTarget, relativeTime } from "../lib/utils.ts";
 
 const LIMITS = [100, 200, 500] as const;
@@ -19,11 +19,27 @@ function toneOf(eventType: string): string {
   return "text-muted";
 }
 
+/** The lease an event went through, by the name it had at the time. */
+function leaseLabel(event: AuditEvent): string | null {
+  if (!event.leaseId) return null;
+  return typeof event.metadata?.leaseName === "string" ? `${event.metadata.leaseName} · ${event.leaseId}` : event.leaseId;
+}
+
+function metadataValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  // Injection events list the secrets they used as { envName, id, name }.
+  if (Array.isArray(value) && value.every((v) => v && typeof v === "object" && "name" in v)) {
+    return value.map((v) => String((v as { name: unknown }).name)).join(", ");
+  }
+  return JSON.stringify(value);
+}
+
 /** The vault's audit log, newest first, like `autho audit`. */
 export function AuditScreen() {
   const app = useApp();
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
   const [limit, setLimit] = useState<(typeof LIMITS)[number]>(200);
+  const [source, setSource] = useState("");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -31,19 +47,19 @@ export function AuditScreen() {
 
   const load = useCallback(async (quiet = true) => {
     try {
-      setEvents(await api.audit(limit));
+      setEvents(await api.audit(limit, source || undefined));
       if (!quiet) toast.success("Reloaded");
     } catch (error) {
       toast.error(errorMessage(error));
     }
-  }, [limit]);
+  }, [limit, source]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   const visible = useMemo(
-    () => (query ? fuzzyFilter(events ?? [], query, (e) => [e.eventType, e.message, e.subjectRef, e.subjectType]) : events ?? []),
+    () => (query ? fuzzyFilter(events ?? [], query, (e) => [e.eventType, e.message, e.subjectRef, e.subjectType, e.source, leaseLabel(e)]) : events ?? []),
     [events, query],
   );
   const selected = visible.find((e) => e.id === selectedId) ?? null;
@@ -95,6 +111,15 @@ export function AuditScreen() {
       actions={
         <>
           <select
+            value={source}
+            onChange={(e) => setSource(e.target.value)}
+            aria-label="Where events came from"
+            className="h-7 cursor-pointer rounded-md border border-border bg-panel-alt px-2 text-xs text-text focus:border-border-focus focus:outline-none"
+          >
+            <option value="">all sources</option>
+            {AUDIT_SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <select
             value={limit}
             onChange={(e) => setLimit(Number(e.target.value) as (typeof LIMITS)[number])}
             aria-label="How many events"
@@ -124,7 +149,7 @@ export function AuditScreen() {
               move("top");
             }
           }}
-          placeholder="Filter by event, message or subject"
+          placeholder="Filter by event, message, subject, source or lease"
           aria-label="Filter audit events"
           className="h-10 flex-1 bg-transparent text-sm text-text placeholder:text-dim focus:outline-none"
         />
@@ -151,15 +176,18 @@ export function AuditScreen() {
                   <time dateTime={event.createdAt} title={formatDate(event.createdAt)} className="w-24 shrink-0 text-dim">{relativeTime(event.createdAt)}</time>
                   <span className={cn("w-44 shrink-0 truncate", toneOf(event.eventType))}>{event.eventType}</span>
                   <span className={cn("min-w-0 flex-1 font-sans text-sm", active ? "text-text" : "truncate text-text/90")}>{event.message}</span>
+                  {event.source ? <span className="shrink-0 rounded bg-panel-alt px-1.5 text-dim">{event.source}</span> : null}
                 </div>
                 {active ? (
                   <dl className="mt-2 grid grid-cols-[8rem_1fr] gap-x-3 gap-y-1 pb-1 pl-[6.75rem] text-muted">
                     <dt className="text-dim">time</dt><dd>{formatDate(event.createdAt)}</dd>
                     <dt className="text-dim">subject</dt><dd className="break-all">{event.subjectType}{event.subjectRef ? ` · ${event.subjectRef}` : ""}</dd>
+                    <dt className="text-dim">source</dt><dd>{event.source ?? "unknown"}</dd>
+                    {event.leaseId ? <><dt className="text-dim">lease</dt><dd className="break-all">{leaseLabel(event)}</dd></> : null}
                     {meta.map(([key, value]) => (
                       <div key={key} className="contents">
                         <dt className="truncate text-dim">{key}</dt>
-                        <dd className="break-all">{typeof value === "string" ? value : JSON.stringify(value)}</dd>
+                        <dd className="break-all">{metadataValue(value)}</dd>
                       </div>
                     ))}
                   </dl>
