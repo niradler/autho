@@ -199,6 +199,13 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
     { id: "quit", title: "Quit", hint: "ctrl+c ×2", group: "App", run: quit },
   ];
 
+  const goVault = useCallback(() => setRoute({ name: "vault" }), []);
+  const goSettings = useCallback(() => setRoute({ name: "settings" }), []);
+  // Pinned at the right of the status bar so the way to Settings and the palette is always visible.
+  const globalHints: KeyHint[] = !session || route.name === "unlock" ? []
+    : route.name === "vault" ? [["ctrl+k", "commands"], [",", "settings"]]
+      : [["ctrl+k", "commands"]];
+
   const title = route.name === "unlock" ? "Locked" : route.name === "form" ? (route.editing ? "Edit secret" : "New secret") : route.name === "settings" ? "Settings" : "Vault";
   const vaultName = basename(vaultPath);
 
@@ -217,7 +224,7 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
       />
     );
   } else if (route.name === "settings") {
-    screen = <SettingsScreen vaultPath={vaultPath} setHints={setHints} onBack={() => setRoute({ name: "vault" })} passkeyRunner={passkeyRunner} />;
+    screen = <SettingsScreen vaultPath={vaultPath} setHints={setHints} onBack={goVault} passkeyRunner={passkeyRunner} />;
   } else {
     screen = (
       <VaultScreen
@@ -226,7 +233,7 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
         initialSelectedId={route.focusId}
         onCreate={() => setRoute({ name: "form", editing: null })}
         onEdit={onEdit}
-        onSettings={() => setRoute({ name: "settings" })}
+        onSettings={goSettings}
         setHints={setHints}
         revealMs={revealMs}
       />
@@ -247,7 +254,7 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
           right={<text fg={theme.dim}>{session ? <span fg={theme.success}>● unlocked</span> : <span fg={theme.muted}>○ locked</span>}  {vaultName}</text>}
         />
         <box flexDirection="column" flexGrow={1}>{screen}</box>
-        <StatusBar hints={hints} toast={toastState} />
+        <StatusBar hints={hints} pinned={globalHints} toast={toastState} />
         {paletteOpen ? <CommandPalette commands={[...commandsRef.current, ...globalCommands]} onClose={() => setPaletteOpen(false)} /> : null}
       </box>
     </AppContext.Provider>

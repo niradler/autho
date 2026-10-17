@@ -204,6 +204,60 @@ describe("TUI", () => {
   });
 });
 
+describe("Navigation", () => {
+  test("the settings shortcut is always in the status bar on a wide terminal", async () => {
+    await renderUnlocked(160);
+    const frame = await settle();
+    expect(frame).toContain("settings");
+    expect(frame).toContain("commands");
+  });
+
+  test("tab moves into the actions, arrows pick one and enter runs it", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressTab();
+    await frameContaining("choose");
+    // copy · open · edit · delete — three quick presses land on delete.
+    t!.mockInput.pressArrow("right");
+    t!.mockInput.pressArrow("right");
+    t!.mockInput.pressArrow("right");
+    await settle();
+    t!.mockInput.pressEnter();
+    await frameContaining("permanently?");
+    t!.mockInput.pressKey("n");
+    await settle();
+    expect(sink.current!.getSecret("github").name).toBe("github");
+  });
+
+  test("esc steps back from the actions to the list", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressArrow("right");
+    await frameContaining("choose");
+    t!.mockInput.pressEscape();
+    await frameContaining("→/tab");
+  });
+
+  test("shift+tab from the list focuses search", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressTab({ shift: true });
+    await frameContaining("filter");
+    await t!.mockInput.typeText("zzz");
+    await frameContaining('No match for "zzz"');
+  });
+
+  test("settings opens on the sidebar; arrows change section until → enters it", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressKey(",");
+    await frameContaining("Vault file");
+    t!.mockInput.pressArrow("down");
+    await frameContaining("Master password");
+    t!.mockInput.pressArrow("right");
+    await settle();
+    t!.mockInput.pressArrow("left");
+    t!.mockInput.pressEscape();
+    await frameContaining("github");
+  });
+});
+
 describe("Settings", () => {
   async function openSettings(): Promise<void> {
     await renderUnlocked();
@@ -211,11 +265,15 @@ describe("Settings", () => {
     await frameContaining("Vault file");
   }
 
+  /** Focus starts on the sidebar: ↓ picks the section, → moves into its rows. */
   async function goToSection(name: string): Promise<string> {
     for (let i = 0; i < 5; i += 1) {
       const frame = await settle();
-      if (frame.includes(`› ${name}`)) return frame;
-      t!.mockInput.pressArrow("right");
+      if (frame.includes(`› ${name}`)) {
+        t!.mockInput.pressArrow("right");
+        return settle();
+      }
+      t!.mockInput.pressArrow("down");
     }
     throw new Error(`Section ${name} not reached`);
   }

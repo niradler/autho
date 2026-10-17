@@ -9,6 +9,11 @@ import { fuzzyFilter, hostOf, isEnter, openUrl, truncate } from "./util.ts";
 
 type Revealed = { id: string; value: string; until: number };
 type Otp = { id: string; code: string; expiresAt: number };
+/** Where arrows and enter act. Tab / shift+tab cycle search → list → actions. */
+type Pane = "search" | "list" | "actions";
+type Action = { id: string; hotkey: string; label: string; color: string; run: () => void };
+
+const PANES: Pane[] = ["search", "list", "actions"];
 
 /** Wide terminals get a list + preview layout; narrow ones switch between the two. */
 const WIDE_MIN_COLUMNS = 96;
@@ -29,7 +34,9 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
 
   const [entries, setEntries] = useState<SecretIndexEntry[]>([]);
   const [query, setQuery] = useState("");
-  const [searchFocused, setSearchFocused] = useState(false);
+  const [pane, setPane] = useState<Pane>("list");
+  const [actionIndex, setActionIndex] = useState(0);
+  const searchFocused = pane === "search";
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId ?? null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [revealed, setRevealed] = useState<Revealed | null>(null);
@@ -67,6 +74,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
     setRevealed((r) => (r && r.id !== selected?.id ? null : r));
     setOtp((o) => (o && o.id !== selected?.id ? null : o));
     setConfirmDelete(false);
+    setActionIndex(0);
   }, [selected?.id]);
 
   const now = useNow(1000, Boolean(revealed || otp));
@@ -153,6 +161,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       app.toast(`Deleted "${entry.name}"`);
       setConfirmDelete(false);
       setDetailOpen(false);
+      setPane("list");
       reload();
     } catch (e) {
       app.toast(e instanceof Error ? e.message : String(e), "error");
@@ -177,6 +186,34 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
   const showDetail = wide || detailOpen;
   const listHeight = Math.max(3, height - 6);
 
+  const actions: Action[] = selected ? [
+    selected.type === "otp"
+      ? { id: "copy", hotkey: "o", label: "copy code", color: theme.success, run: () => copyPrimary(selected) }
+      : { id: "copy", hotkey: "c", label: `copy ${valueName(selected.type).toLowerCase()}`, color: theme.success, run: () => copyPrimary(selected) },
+    ...(selected.url && selected.type !== "otp" ? [{ id: "open", hotkey: "o", label: "open", color: theme.info, run: () => open(selected) }] : []),
+    { id: "edit", hotkey: "e", label: "edit", color: theme.accent, run: () => onEdit(selected.id) },
+    { id: "delete", hotkey: "d", label: "delete", color: theme.danger, run: () => setConfirmDelete(true) },
+  ] : [];
+  const currentAction = Math.min(actionIndex, Math.max(0, actions.length - 1));
+
+  /** Moves focus to another pane; the action row needs a selection to land on. */
+  const focusPane = (next: Pane) => {
+    if (next === "actions") {
+      if (!selected) return;
+      setDetailOpen(true);
+      setActionIndex(0);
+    }
+    if (next !== "actions" && !wide) setDetailOpen(false);
+    setPane(next);
+  };
+
+  const cyclePane = (delta: number) => {
+    let index = PANES.indexOf(pane);
+    do index = (index + delta + PANES.length) % PANES.length;
+    while (PANES[index] === "actions" && !selected);
+    focusPane(PANES[index]!);
+  };
+
   useKeyboard((key) => {
     if (!app.active || key.ctrl || key.meta) return;
 
@@ -187,9 +224,11 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       return;
     }
 
+    if (key.name === "tab") { key.preventDefault(); cyclePane(key.shift ? -1 : 1); return; }
+
     if (searchFocused) {
-      if (key.name === "escape") { setQuery(""); setSearchFocused(false); }
-      else if (isEnter(key) || key.name === "down" || key.name === "tab") { key.preventDefault(); setSearchFocused(false); }
+      if (key.name === "escape") { setQuery(""); setPane("list"); }
+      else if (isEnter(key) || key.name === "down") { key.preventDefault(); setPane("list"); }
       return;
     }
 
@@ -202,27 +241,44 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       case "g": move(key.shift ? filtered.length : -filtered.length); return;
       case "home": move(-filtered.length); return;
       case "end": move(filtered.length); return;
-      case "/": key.preventDefault(); setSearchFocused(true); return;
+      case "/": key.preventDefault(); focusPane("search"); return;
       case "n": onCreate(); return;
       case "q": app.quit(); return;
       case "?": app.openPalette(); return;
       case ",": onSettings(); return;
       case "r": reload(); app.toast("Reloaded", "info"); return;
     }
-    if (!selected) return;
 
-    if (isEnter(key)) {
-      if (!showDetail) setDetailOpen(true);
-      else copyPrimary(selected);
+    // Esc steps back one level: actions → list, then hides a revealed value, then clears the filter.
+    if (key.name === "escape") {
+      if (pane === "actions") focusPane("list");
+      else if (revealed) setRevealed(null);
+      else if (query) setQuery("");
       return;
     }
-    switch (key.name) {
-      case "right": case "l": setDetailOpen(true); return;
-      case "left": case "h": case "escape":
-        if (detailOpen && !wide) setDetailOpen(false);
-        else if (revealed) setRevealed(null);
-        else if (query) setQuery("");
+    if (!selected) return;
+
+    if (pane === "actions") {
+      switch (key.name) {
+        // Functional updates: key repeat can land several presses before a re-render.
+        case "left": case "h":
+          if (currentAction === 0) focusPane("list");
+          else setActionIndex((i) => Math.max(0, Math.min(i, actions.length - 1) - 1));
+          return;
+        case "right": case "l": setActionIndex((i) => Math.min(actions.length - 1, i + 1)); return;
+        case "space": actions[currentAction]?.run(); return;
+      }
+      if (isEnter(key)) { actions[currentAction]?.run(); return; }
+    } else {
+      if (key.name === "right" || key.name === "l") { focusPane("actions"); return; }
+      if (isEnter(key)) {
+        // Wide: the detail is already on screen, so enter is the quick copy. Narrow: open it.
+        if (showDetail) copyPrimary(selected);
+        else focusPane("actions");
         return;
+      }
+    }
+    switch (key.name) {
       case "c": copyPrimary(selected); return;
       case "u": copyUsername(selected); return;
       case "w": copyUrl(selected); return;
@@ -239,7 +295,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
   const commands = useMemo<Command[]>(() => {
     const list: Command[] = [
       { id: "new", title: "New secret", hint: "n", group: "Vault", run: onCreate },
-      { id: "search", title: "Search secrets", hint: "/", group: "Vault", run: () => setSearchFocused(true) },
+      { id: "search", title: "Search secrets", hint: "/", group: "Vault", run: () => setPane("search") },
       { id: "reload", title: "Reload list", hint: "r", group: "Vault", run: reload },
     ];
     if (selected) {
@@ -263,7 +319,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
         title: entry.name,
         hint: entry.username ?? (entry.url ? hostOf(entry.url) : typeLabel(entry.type)),
         group: "Jump to",
-        run: () => { setQuery(""); setSelectedId(entry.id); setDetailOpen(true); },
+        run: () => { setQuery(""); setSelectedId(entry.id); setDetailOpen(true); setPane("actions"); },
       });
     }
     return list;
@@ -279,10 +335,11 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
     let hints: KeyHint[];
     if (confirmDelete) hints = [["y", "delete"], ["n/esc", "cancel"]];
     else if (searchFocused) hints = [["type", "filter"], ["enter/↓", "results"], ["esc", "clear"]];
-    else if (!showDetail) hints = [["↑↓", "move"], ["enter", "open"], ["c", "copy"], ["u", "user"], ["/", "search"], ["n", "new"], ["ctrl+k", "commands"], [",", "settings"], ["q", "quit"]];
-    else hints = [["enter/c", "copy"], ["u", "user"], ["s", "reveal"], ...(selected?.type === "otp" ? [["o", "code"] as KeyHint] : []), ["e", "edit"], ["d", "delete"], ["/", "search"], ["ctrl+k", "commands"], wide ? ["q", "quit"] : ["esc", "back"]];
+    else if (pane === "actions") hints = [["←→", "choose"], ["enter", "run"], ["↑↓", "secret"], ["esc", "back"]];
+    else if (!showDetail) hints = [["↑↓", "move"], ["enter", "open"], ["c", "copy"], ["/", "search"], ["n", "new"], ["q", "quit"]];
+    else hints = [["↑↓", "move"], ["enter", "copy"], ["→/tab", "actions"], ["/", "search"], ["n", "new"], ["q", "quit"]];
     setHints(hints);
-  }, [confirmDelete, searchFocused, showDetail, wide, selected?.type, setHints]);
+  }, [confirmDelete, searchFocused, pane, showDetail, setHints]);
 
   const listWidth = wide ? Math.max(32, Math.floor(width * 0.38)) : width;
   const offset = Math.max(0, Math.min(selectedIndex - Math.floor(listHeight / 2), filtered.length - listHeight));
@@ -317,7 +374,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
             height={1}
             paddingX={1}
             backgroundColor={isSelected ? theme.selection : undefined}
-            onMouseDown={() => { setSelectedId(entry.id); if (!wide) setDetailOpen(true); }}
+            onMouseDown={() => { setSelectedId(entry.id); if (wide) setPane("list"); else { setDetailOpen(true); setPane("actions"); } }}
           >
             <text>
               <span fg={badge.color}>{badge.glyph} </span>
@@ -337,11 +394,8 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       otp={otp?.id === selected.id ? otp : null}
       now={now}
       confirmDelete={confirmDelete}
-      onCopy={() => copyPrimary(selected)}
-      onOtp={() => copyPrimary(selected)}
-      onOpen={() => open(selected)}
-      onEdit={() => onEdit(selected.id)}
-      onDelete={() => setConfirmDelete(true)}
+      actions={actions}
+      focusedAction={pane === "actions" ? currentAction : null}
     />
   ) : (
     <box flexGrow={1} border borderStyle="rounded" borderColor={theme.border} padding={1}>
@@ -363,20 +417,22 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
   );
 }
 
-function Detail({ entry, revealed, otp, now, confirmDelete, onCopy, onOtp, onOpen, onEdit, onDelete }: {
+function valueName(type: string): string {
+  return type === "note" ? "Note" : type === "otp" ? "Secret key" : "Password";
+}
+
+function Detail({ entry, revealed, otp, now, confirmDelete, actions, focusedAction }: {
   entry: SecretIndexEntry;
   revealed: Revealed | null;
   otp: Otp | null;
   now: number;
   confirmDelete: boolean;
-  onCopy: () => void;
-  onOtp: () => void;
-  onOpen: () => void;
-  onEdit: () => void;
-  onDelete: () => void;
+  actions: Action[];
+  /** Index of the keyboard-focused action, or null when focus is elsewhere. */
+  focusedAction: number | null;
 }) {
   const badge = typeBadge(entry.type);
-  const valueLabel = entry.type === "note" ? "Note" : entry.type === "otp" ? "Secret key" : "Password";
+  const valueLabel = valueName(entry.type);
   const revealSeconds = revealed ? Math.max(0, Math.ceil((revealed.until - now) / 1000)) : 0;
   const otpSeconds = otp ? Math.max(0, Math.ceil((otp.expiresAt - now) / 1000)) : 0;
   const otpBar = 10;
@@ -425,12 +481,9 @@ function Detail({ entry, revealed, otp, now, confirmDelete, onCopy, onOtp, onOpe
         </box>
       ) : (
         <box flexDirection="row" gap={1} flexWrap="wrap">
-          {entry.type === "otp"
-            ? <Button hotkey="o" label="copy code" onPress={onOtp} color={theme.success} />
-            : <Button hotkey="c" label={`copy ${valueLabel.toLowerCase()}`} onPress={onCopy} color={theme.success} />}
-          {entry.url && entry.type !== "otp" ? <Button hotkey="o" label="open" onPress={onOpen} color={theme.info} /> : null}
-          <Button hotkey="e" label="edit" onPress={onEdit} color={theme.accent} />
-          <Button hotkey="d" label="delete" onPress={onDelete} color={theme.danger} />
+          {actions.map((action, i) => (
+            <Button key={action.id} hotkey={action.hotkey} label={action.label} onPress={action.run} color={action.color} focused={focusedAction === i} />
+          ))}
         </box>
       )}
     </box>
