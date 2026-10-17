@@ -60,7 +60,7 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice, passkeyRun
   const finish = useCallback((creds: UnlockCredentials) => {
     setStep("unlocking");
     try {
-      onUnlock(VaultService.unlock(vaultPath, { ...creds, sealRecord: sealRecord.current }));
+      onUnlock(VaultService.unlock(vaultPath, { ...creds, sealRecord: sealRecord.current, source: "tui" }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setPassword("");
@@ -80,7 +80,7 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice, passkeyRun
           const token = readRecoveryToken(recoveryFile);
           if (token) {
             try {
-              const session = VaultService.unlock(vaultPath, { password: "", recovery: token, sealRecord: sealRecord.current });
+              const session = VaultService.unlock(vaultPath, { password: "", recovery: token, sealRecord: sealRecord.current, source: "tui" });
               if (!cancelled) onUnlock(session);
               return;
             } catch {

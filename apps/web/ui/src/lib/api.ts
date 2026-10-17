@@ -63,11 +63,17 @@ export type AuditEvent = {
   id: string;
   createdAt: string;
   eventType: string;
+  /** Set when the event happened through a lease (env, exec, lease use). */
+  leaseId: string | null;
   message: string;
   metadata: Record<string, unknown>;
+  /** Where it happened: cli, tui, web or daemon; null for events from before sources were recorded. */
+  source: string | null;
   subjectRef: string | null;
   subjectType: string;
 };
+
+export const AUDIT_SOURCES = ["cli", "tui", "web", "daemon"] as const;
 
 export type SealChange = { change: "added" | "modified" | "removed"; rowId: string; table: string };
 export type SealState = {
@@ -210,7 +216,8 @@ export const api = {
   createLease: (body: { name: string; secrets: string[]; ttlSeconds: number; includeLinks: boolean }) => request<Lease>("POST", "/api/leases", body),
   revokeLease: (id: string) => request<Lease>("POST", `/api/leases/${encodeURIComponent(id)}/revoke`),
 
-  audit: (limit = 200) => request<AuditEvent[]>("GET", `/api/audit?limit=${limit}`),
+  audit: (limit = 200, source?: string) =>
+    request<AuditEvent[]>("GET", `/api/audit?limit=${limit}${source ? `&source=${encodeURIComponent(source)}` : ""}`),
   verify: () => request<SealState>("GET", "/api/vault/verify"),
   importLegacy: (entries: unknown, skipExisting: boolean) => request<{ imported: number; skipped: number }>("POST", "/api/import", { entries, skipExisting }),
 

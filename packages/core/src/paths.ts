@@ -38,6 +38,7 @@ export type AuthoConfig = {
   daemonTtlSeconds?: number;
   webPort?: number;
   webWithTui?: boolean;
+  auditRetentionDays?: number;
 };
 
 const configCache: { value: AuthoConfig | null; loaded: boolean } = { value: null, loaded: false };

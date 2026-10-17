@@ -19,7 +19,9 @@ import {
   startDaemonServer,
 } from "../../../packages/core/src/daemon.ts";
 import {
+  AUDIT_SOURCES,
   VaultService,
+  type AuditSource,
   type SealChange,
   type UnlockCredentials,
   type AuthoConfig,
@@ -315,7 +317,7 @@ async function runPromptMode(vaultPath: string, initialPassword?: string): Promi
 
   try {
     const password = await askPassword(prompt, initialPassword);
-    const session = VaultService.unlock(vaultPath, { password, sealRecord: await loadSealRecord(vaultPath) });
+    const session = VaultService.unlock(vaultPath, { password, sealRecord: await loadSealRecord(vaultPath), source: "cli" });
     try {
       const action = (await prompt.ask("Action [create/read/list/delete/otp/exit]: ")).toLowerCase();
 
@@ -417,7 +419,7 @@ async function resolveUnlockCredentials(
   // A passkey replaces password, PIN and TOTP: the authenticator already
   // required user verification (biometric or PIN) to release its PRF value.
   if (wantsPasskey(args)) {
-    return { ...(await passkeyCredentials(vaultPath)), sealRecord };
+    return { ...(await passkeyCredentials(vaultPath)), sealRecord, source: "cli" };
   }
 
   // Password: --password > AUTHO_MASTER_PASSWORD > OS keychain > interactive prompt
@@ -429,7 +431,7 @@ async function resolveUnlockCredentials(
     password = await readPasswordMasked("Master password: ");
   }
 
-  const creds: UnlockCredentials = { password: required(password, "--password"), sealRecord };
+  const creds: UnlockCredentials = { password: required(password, "--password"), sealRecord, source: "cli" };
 
   // PIN check (if set on this machine)
   // Resolution order: AUTHO_PIN env var > --pin flag > interactive prompt
@@ -618,7 +620,7 @@ function help(): string {
     "  file decrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
     "  files encrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
     "  files decrypt --input <path> [--output <path>] [--force] [--vault <path>] [--json]",
-    "  audit list [--limit <number>] [--vault <path>] [--json]",
+    "  audit list [--limit <number>] [--source cli|tui|web|daemon] [--type <prefix>] [--secret <ref>] [--lease <ref>] [--vault <path>] [--json]",
     "  recovery generate --output <path> [--vault <path>] [--json]",
     "  recovery revoke [--vault <path>] [--json]",
     "  unlock --recovery-file <path> [--vault <path>] [--json]",
@@ -765,7 +767,7 @@ async function main(): Promise<void> {
     if (!existingStatus.initialized) {
       // First run: create vault
       const pw = required(password, "--password");
-      output(VaultService.initialize(effectiveVaultPath, pw), jsonMode);
+      output(VaultService.initialize(effectiveVaultPath, pw, "cli"), jsonMode);
 
       // Interactive setup wizard (TTY only, not in --json mode)
       if (process.stdin.isTTY && !jsonMode) {
@@ -1129,14 +1131,15 @@ async function main(): Promise<void> {
   if (scope === Scope.Unlock && getString(args, "recovery-file")) {
     const recoveryFilePath = absolutePath(getString(args, "recovery-file") as string);
     const token = parseRecoveryFile(readFileSync(recoveryFilePath, "utf8"));
-    const recoverySession = VaultService.unlock(vaultPath, { password: "", recovery: token });
+    const recoverySession = VaultService.unlock(vaultPath, { password: "", recovery: token, source: "cli" });
     output({ unlocked: true, vaultPath }, jsonMode);
     recoverySession.close();
     return;
   }
 
   const creds = await resolveUnlockCredentials(vaultPath, args, password);
-  const session = VaultService.unlock(vaultPath, creds);
+  // One-shot commands audit what they do, not the unlock that precedes each one.
+  const session = VaultService.unlock(vaultPath, creds, { recordUnlock: false });
 
   try {
     if (scope === Scope.Import && action === Action.Legacy) {
@@ -1342,7 +1345,23 @@ async function main(): Promise<void> {
     }
 
     if (scope === Scope.Audit && action === Action.List) {
-      output(session.listAudit(Number(getString(args, "limit") ?? "50")), jsonMode);
+      const source = getString(args, "source");
+      if (source && !AUDIT_SOURCES.includes(source as AuditSource)) {
+        throw new Error(`Unknown --source: ${source}. Use one of: ${AUDIT_SOURCES.join(", ")}`);
+      }
+      const events = session.listAudit({
+        eventType: getString(args, "type"),
+        leaseRef: getString(args, "lease"),
+        limit: Number(getString(args, "limit") ?? "50"),
+        secretRef: getString(args, "secret"),
+        source: source as AuditSource | undefined,
+      });
+      if (jsonMode) {
+        output(events, true);
+      } else {
+        // Metadata objects make console.table unreadable; --json has the full events.
+        output(events.map((e) => ({ time: e.createdAt, source: e.source ?? "", event: e.eventType, message: e.message })), false);
+      }
       return;
     }
 

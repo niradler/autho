@@ -4,6 +4,7 @@ import { basename, join, resolve } from "node:path";
 
 import { AuthoDatabase } from "../../../packages/storage/src/index.ts";
 import {
+  AUDIT_SOURCES,
   MIN_PASSWORD_LENGTH,
   PREFERENCES,
   VaultService,
@@ -19,6 +20,7 @@ import {
   resolvePreference,
   saveConfig,
   setPreference,
+  type AuditSource,
   type PreferenceKey,
   type SecretIndexEntry,
   type UnlockCredentials,
@@ -182,6 +184,7 @@ async function withVault<T>(ctx: ApiContext, session: WebSession, fn: (vault: Va
   const vault = new VaultSession(new AuthoDatabase(ctx.vaultPath), session.rootKey, {
     sealBound: session.sealBound,
     sealRecord: await loadSealRecord(ctx.vaultPath),
+    source: "web",
   });
   try {
     return fn(vault);
@@ -277,7 +280,7 @@ route("GET", "/api/auth", false, (ctx) => {
 
 route("POST", "/api/session/unlock", false, async (ctx, { body }) => {
   const { rootKey, sealBound } = await throttled(ctx, body, true, async (creds) => {
-    const vault = VaultService.unlock(ctx.vaultPath, { ...creds, sealRecord: await loadSealRecord(ctx.vaultPath) });
+    const vault = VaultService.unlock(ctx.vaultPath, { ...creds, sealRecord: await loadSealRecord(ctx.vaultPath), source: "web" });
     const unlocked = { rootKey: vault.getRootKey(), sealBound: vault.sealBound };
     await closeSessionAndRecordSeal(ctx.vaultPath, vault);
     return unlocked;
@@ -382,7 +385,18 @@ route("POST", "/api/leases/:id/revoke", true, (ctx, { params, session }) =>
 
 route("GET", "/api/audit", true, (ctx, { query, session }) => {
   const limit = Math.min(500, Math.max(1, Number(query.get("limit") ?? 100) || 100));
-  return withVault(ctx, session!, (vault) => ({ data: vault.listAudit(limit) }));
+  const filter = (key: string) => query.get(key)?.trim() || undefined;
+  const source = filter("source");
+  if (source && !AUDIT_SOURCES.includes(source as AuditSource)) throw new HttpError(400, `Unknown source: ${source}`);
+  return withVault(ctx, session!, (vault) => ({
+    data: vault.listAudit({
+      eventType: filter("type"),
+      leaseRef: filter("lease"),
+      limit,
+      secretRef: filter("secret"),
+      source: source as AuditSource | undefined,
+    }),
+  }));
 });
 
 route("GET", "/api/vault/verify", true, (ctx, { session }) =>
@@ -449,7 +463,7 @@ route("PUT", "/api/settings/vault-dir", true, (ctx, { body, session }) => {
 
 route("POST", "/api/admin/authorize", true, async (ctx, { body, session }) => {
   const handle = await throttled(ctx, body, false, async (creds) =>
-    VaultService.authorize(ctx.vaultPath, { ...creds, sealRecord: await loadSealRecord(ctx.vaultPath) }));
+    VaultService.authorize(ctx.vaultPath, { ...creds, sealRecord: await loadSealRecord(ctx.vaultPath), source: "web" }));
   ctx.sessions.grantAdmin(session!, handle);
   return { data: await securityStatus(ctx, session!) };
 });

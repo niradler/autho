@@ -14,14 +14,15 @@ export type PreferenceKey =
   | "defaultLeaseTtl"
   | "daemonTtlSeconds"
   | "webPort"
-  | "webWithTui";
+  | "webWithTui"
+  | "auditRetentionDays";
 
 type NumberSpec = {
   kind: "number";
   key: PreferenceKey;
   label: string;
   help: string;
-  unit?: "s";
+  unit?: "s" | "d";
   default: number;
   min: number;
   max: number;
@@ -52,6 +53,7 @@ export const PREFERENCES: readonly PreferenceSpec[] = [
   { kind: "number", key: "daemonTtlSeconds", label: "Daemon session", help: "How long `daemon unlock` keeps the vault open without --ttl", unit: "s", default: 900, min: 60, max: 86_400 },
   { kind: "number", key: "webPort", label: "Web UI port", help: "Port for `autho web serve` (when --port is not given) and for the web UI the TUI serves", default: 8061, min: 1024, max: 65_535 },
   { kind: "boolean", key: "webWithTui", label: "Web UI with TUI", help: "Serve the web UI on localhost while the TUI is open; it unlocks on its own. Applies on next start", default: true, env: "AUTHO_WEB_WITH_TUI" },
+  { kind: "number", key: "auditRetentionDays", label: "Audit retention", help: "Audit events older than this are deleted when the vault is unlocked (0 = keep forever)", unit: "d", default: 90, min: 0, max: 3650, env: "AUTHO_AUDIT_RETENTION_DAYS", zero: "forever" },
 ];
 
 export type PreferenceSource = "env" | "config" | "default";
@@ -126,6 +128,7 @@ export function formatPreference(key: PreferenceKey, value: number | boolean): s
   const spec = preferenceSpec(key)!;
   if (spec.kind === "boolean") return value ? "on" : "off";
   if (value === 0 && spec.zero) return spec.zero;
+  if (spec.unit === "d") return `${value}d`;
   return spec.unit === "s" ? formatSeconds(value as number) : String(value);
 }
 

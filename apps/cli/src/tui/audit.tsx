@@ -28,11 +28,23 @@ function subjectName(event: AuditEvent, names: Map<string, string>): string | nu
 function matches(event: AuditEvent, query: string, names: Map<string, string>): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return [event.eventType, event.message, event.subjectRef ?? "", event.subjectType, subjectName(event, names) ?? ""].some((field) => field.toLowerCase().includes(q));
+  const fields = [event.eventType, event.message, event.subjectRef ?? "", event.subjectType, subjectName(event, names) ?? "", event.source ?? "", leaseLabel(event, names) ?? ""];
+  return fields.some((field) => field.toLowerCase().includes(q));
+}
+
+/** The lease an event was made through, by name when it still exists. */
+function leaseLabel(event: AuditEvent, names: Map<string, string>): string | null {
+  if (!event.leaseId) return null;
+  return names.get(event.leaseId) ?? (typeof event.metadata.leaseName === "string" ? event.metadata.leaseName : event.leaseId);
 }
 
 function metadataValue(value: unknown): string {
-  return typeof value === "string" ? value : JSON.stringify(value);
+  if (typeof value === "string") return value;
+  // Injection events list the secrets they used as { envName, id, name }.
+  if (Array.isArray(value) && value.every((v) => v && typeof v === "object" && "name" in v)) {
+    return value.map((v) => String((v as { name: unknown }).name)).join(", ");
+  }
+  return JSON.stringify(value);
 }
 
 /** Audit: the vault's event log, newest first, like `autho audit`. */
@@ -52,7 +64,7 @@ export function AuditScreen({ session, setHints }: { session: VaultSession; setH
 
   const reload = useCallback(() => {
     try {
-      setEvents(session.listAudit(limit));
+      setEvents(session.listAudit({ limit }));
       setNames(new Map([
         ...session.listSecretIndex().map((e): [string, string] => [e.id, e.name]),
         ...session.listLeases(500).map((l): [string, string] => [l.id, l.name]),
@@ -143,7 +155,8 @@ export function AuditScreen({ session, setHints }: { session: VaultSession; setH
         const on = event.id === selected?.id;
         const when = relativeTime(event.createdAt, now);
         const type = truncate(event.eventType, typeWidth).padEnd(typeWidth);
-        const subject = truncate(subjectName(event, names) ?? event.message, Math.max(4, listWidth - typeWidth - when.length - 10));
+        const source = event.source ?? "";
+        const subject = truncate(subjectName(event, names) ?? event.message, Math.max(4, listWidth - typeWidth - when.length - source.length - 12));
         return (
           <box
             key={event.id}
@@ -159,7 +172,7 @@ export function AuditScreen({ session, setHints }: { session: VaultSession; setH
               {on ? <strong fg={theme.accent}>{type}</strong> : <span fg={theme.text}>{type}</span>}
               <span fg={theme.muted}>  {subject}</span>
             </text>
-            <text flexShrink={0} fg={theme.dim}>{when}</text>
+            <text flexShrink={0} fg={theme.dim}>{source ? `${source} · ` : ""}{when}</text>
           </box>
         );
       })}
@@ -172,6 +185,8 @@ export function AuditScreen({ session, setHints }: { session: VaultSession; setH
       <text fg={theme.text} wrapMode="word" marginBottom={1}>{selected.message}</text>
       <FieldRow label="Time" value={`${formatDate(selected.createdAt)} · ${relativeTime(selected.createdAt, now)}`} />
       <FieldRow label="Subject" value={[selected.subjectType, subjectName(selected, names), selected.subjectRef].filter(Boolean).join(" · ")} />
+      <FieldRow label="Source" value={selected.source ?? "unknown"} />
+      {selected.leaseId ? <FieldRow label="Lease" value={[leaseLabel(selected, names), selected.leaseId].filter(Boolean).join(" · ")} /> : null}
       <FieldRow label="ID" value={selected.id} color={theme.muted} />
       {metadata.length ? <text marginTop={1} fg={theme.muted}>Details</text> : null}
       {metadata.slice(0, Math.max(1, height - 16)).map(([k, v]) => (
@@ -188,7 +203,7 @@ export function AuditScreen({ session, setHints }: { session: VaultSession; setH
     <box flexDirection="column" flexGrow={1} width="100%">
       <box flexDirection="row" paddingX={1} height={1}>
         <text bg={filtering ? theme.accent : theme.chip} fg={filtering ? theme.onAccent : theme.muted}> / </text>
-        <TextField value={query} onChange={setQuery} focused={filtering && app.active} placeholder="filter by event, subject, message…" />
+        <TextField value={query} onChange={setQuery} focused={filtering && app.active} placeholder="filter by event, subject, source, lease…" />
       </box>
       <box flexDirection="row" flexGrow={1} gap={1}>
         {wide || !detailOpen ? list : null}

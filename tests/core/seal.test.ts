@@ -50,7 +50,7 @@ function secretId(name: string): string {
 }
 
 function auditTypes(session: VaultSession): string[] {
-  return session.listAudit(200).map((event) => event.eventType);
+  return session.listAudit({ limit: 200 }).map((event) => event.eventType);
 }
 
 test("a new vault is sealed and stays intact across changes", () => {

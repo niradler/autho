@@ -36,10 +36,10 @@ test("listSecretIndex returns display fields but never secret values", () => {
   expect("value" in github).toBe(false);
 });
 
-test("listSecretIndex is audited once per call", () => {
+test("listSecretIndex is not audited: no value leaves the vault", () => {
   session.addSecret({ name: "a", type: "password", value: "1" });
-  session.addSecret({ name: "b", type: "password", value: "2" });
+  const before = session.listAudit({ limit: 100 }).length;
   session.listSecretIndex();
-  const events = session.listAudit(100).filter((e) => e.eventType === "secret.index");
-  expect(events).toHaveLength(1);
+  session.listSecretIndex();
+  expect(session.listAudit({ limit: 100 })).toHaveLength(before);
 });
