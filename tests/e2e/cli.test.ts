@@ -798,6 +798,47 @@ describe("autho rewrite CLI", () => {
       await web.exited;
     }
   });
+
+  // The npm package ships only the bundle, so `web serve` must not depend on repo source paths.
+  test("web serve works from the built bundle outside the repo", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-web-bundle-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const port = 19000 + Math.floor(Math.random() * 1000);
+    expect(runCli(["init", "--vault", vaultPath, "--password", "correct horse battery staple"]).exitCode).toBe(0);
+
+    // Same flags as build:cli; written under dist/ so the externals still resolve from node_modules.
+    const outdir = join(repoRoot, "apps", "cli", "dist", "e2e");
+    const build = await Bun.build({
+      entrypoints: [join(repoRoot, "apps", "cli", "src", "index.ts")],
+      external: ["@opentui/core", "@opentui/react", "react"],
+      outdir,
+      target: "bun",
+    });
+    expect(build.success).toBe(true);
+
+    const web = Bun.spawn({
+      cmd: ["bun", "--no-env-file", join(outdir, "index.js"), "web", "serve", "--vault", vaultPath, "--port", String(port)],
+      cwd: tempRoot,
+      env: { ...baseEnv, AUTHO_DISABLE_OS_SECRETS: "1", AUTHO_HOME: testAuthoHome },
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+
+    try {
+      await waitFor(async () => {
+        try {
+          return (await fetch(`http://127.0.0.1:${port}/health`)).ok;
+        } catch {
+          return false;
+        }
+      });
+      const page = await fetch(`http://127.0.0.1:${port}/`);
+      expect(await page.text()).toContain("Autho Local Web");
+    } finally {
+      web.kill();
+      await web.exited;
+    }
+  });
 });
 
 describe("autho security features (PIN, TOTP, recovery file)", () => {

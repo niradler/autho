@@ -1,0 +1,370 @@
+import { randomBytes } from "node:crypto";
+import { resolve } from "node:path";
+
+import { AuthoDatabase } from "../../../packages/storage/src/index.ts";
+import { VaultService, VaultSession, defaultVaultPath } from "../../../packages/core/src/index.ts";
+import { closeSessionAndRecordSeal, loadSealRecord } from "../../../packages/core/src/os-secrets.ts";
+
+type SessionState = {
+  expiresAt: string;
+  rootKey: Buffer;
+  /** The root key's wrap says the vault is sealed. */
+  sealBound: boolean;
+};
+
+function json(data: unknown, status = 200, headers?: HeadersInit): Response {
+  return new Response(JSON.stringify(data, null, 2), {
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...(headers ?? {}),
+    },
+    status,
+  });
+}
+
+function html(body: string): Response {
+  return new Response(body, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+    },
+  });
+}
+
+function parseCookies(request: Request): Record<string, string> {
+  const cookieHeader = request.headers.get("cookie") ?? "";
+  return Object.fromEntries(
+    cookieHeader
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const index = part.indexOf("=");
+        return [part.slice(0, index), decodeURIComponent(part.slice(index + 1))];
+      }),
+  );
+}
+
+/** Opens a session per request, with the current keychain seal record so a swapped-in older vault file is caught. */
+async function openSession(vaultPath: string, state: SessionState): Promise<VaultSession> {
+  return new VaultSession(new AuthoDatabase(vaultPath), state.rootKey, {
+    sealBound: state.sealBound,
+    sealRecord: await loadSealRecord(vaultPath),
+  });
+}
+
+function requireSession(request: Request, sessions: Map<string, SessionState>): SessionState & { id: string } {
+  const cookies = parseCookies(request);
+  const sessionId = cookies.autho_session;
+  if (!sessionId) {
+    throw new Error("Missing web session");
+  }
+  const session = sessions.get(sessionId);
+  if (!session) {
+    throw new Error("Unknown web session");
+  }
+  if (Date.parse(session.expiresAt) <= Date.now()) {
+    sessions.delete(sessionId);
+    throw new Error("Expired web session");
+  }
+  return { ...session, id: sessionId };
+}
+
+async function readJson<T>(request: Request): Promise<T> {
+  return (await request.json()) as T;
+}
+
+function page(): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Autho</title>
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; background: #f5f1e8; color: #1f2937; }
+    main { max-width: 760px; margin: 0 auto; padding: 32px 20px 64px; }
+    section { background: #fffdf8; border: 1px solid #d6cbb8; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 8px 30px rgba(83,58,18,0.08); }
+    h1 { margin-top: 0; font-size: 2rem; }
+    input, select, button { font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid #bca889; }
+    button { background: #1f4d3a; color: white; border: none; cursor: pointer; }
+    form { display: flex; gap: 8px; flex-wrap: wrap; }
+    pre { background: #1f2937; color: #f9fafb; padding: 12px; border-radius: 12px; overflow: auto; }
+    ul { padding-left: 18px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Autho Local Web</h1>
+      <p>Local-only Bun web UI for vault unlock and secret browsing.</p>
+      <form id="unlock-form">
+        <input id="password" type="password" placeholder="Master password" required />
+        <input id="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="Authenticator code (if enabled)" />
+        <button type="submit">Unlock</button>
+      </form>
+    </section>
+    <section>
+      <h2>Secrets</h2>
+      <button id="refresh">Refresh</button>
+      <ul id="secret-list"></ul>
+      <pre id="output"></pre>
+    </section>
+    <section id="linked" hidden>
+      <h2>Linked to <span id="linked-name"></span></h2>
+      <ul id="linked-list"></ul>
+      <p id="linked-from"></p>
+      <form id="link-form">
+        <input id="link-ref" placeholder="Secret name or id to link" required />
+        <button type="submit">Link</button>
+      </form>
+    </section>
+  </main>
+  <script>
+    const output = document.getElementById('output');
+    const secretList = document.getElementById('secret-list');
+    async function refresh() {
+      const response = await fetch('/api/secrets');
+      if (!response.ok) {
+        output.textContent = await response.text();
+        return;
+      }
+      const data = await response.json();
+      secretList.innerHTML = '';
+      data.data.forEach((secret) => {
+        const item = document.createElement('li');
+        const open = document.createElement('a');
+        open.href = '#';
+        open.textContent = secret.name + " (" + secret.type + ")" + (secret.linkCount ? " · " + secret.linkCount + " linked" : "");
+        open.addEventListener('click', (event) => { event.preventDefault(); showSecret(secret.id); });
+        item.appendChild(open);
+        secretList.appendChild(item);
+      });
+      output.textContent = JSON.stringify(data, null, 2);
+    }
+    let current = null;
+    async function showSecret(ref) {
+      const response = await fetch('/api/secrets/' + encodeURIComponent(ref));
+      if (!response.ok) {
+        output.textContent = await response.text();
+        return;
+      }
+      const secret = (await response.json()).data;
+      current = secret;
+      const { links, linkedFrom, ...rest } = secret;
+      output.textContent = JSON.stringify(rest, null, 2);
+      document.getElementById('linked').hidden = false;
+      document.getElementById('linked-name').textContent = secret.name;
+      const list = document.getElementById('linked-list');
+      list.innerHTML = '';
+      if (!links.length) {
+        list.innerHTML = '<li>No linked secrets</li>';
+      }
+      links.forEach((linked) => {
+        const item = document.createElement('li');
+        const open = document.createElement('a');
+        open.href = '#';
+        open.textContent = linked.name + " (" + linked.type + ") ";
+        open.addEventListener('click', (event) => { event.preventDefault(); showSecret(linked.id); });
+        const unlink = document.createElement('button');
+        unlink.textContent = 'Unlink';
+        unlink.addEventListener('click', () => changeLink('DELETE', linked.id));
+        item.append(open, unlink);
+        list.appendChild(item);
+      });
+      document.getElementById('linked-from').textContent = linkedFrom.length
+        ? 'Linked from: ' + linkedFrom.map((primary) => primary.name).join(', ')
+        : '';
+    }
+    async function changeLink(method, secret) {
+      const response = await fetch('/api/links', {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ primary: current.id, secret })
+      });
+      if (!response.ok) {
+        output.textContent = await response.text();
+        return;
+      }
+      await showSecret(current.id);
+      await refresh();
+    }
+    document.getElementById('link-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const input = document.getElementById('link-ref');
+      await changeLink('POST', input.value);
+      input.value = '';
+    });
+    document.getElementById('unlock-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const response = await fetch('/api/session/unlock', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          password: document.getElementById('password').value,
+          totp: document.getElementById('totp').value || undefined
+        })
+      });
+      output.textContent = await response.text();
+      if (response.ok) {
+        await refresh();
+      }
+    });
+    document.getElementById('refresh').addEventListener('click', refresh);
+  </script>
+</body>
+</html>`;
+}
+
+export type WebServerOptions = { host?: string; port?: number; vaultPath?: string };
+
+/** Serves the local web UI until the process exits. */
+export async function startWebServer(options: WebServerOptions = {}): Promise<void> {
+  const vaultPath = resolve(options.vaultPath ?? defaultVaultPath());
+  const host = options.host ?? "127.0.0.1";
+  const port = options.port ?? 8061;
+  const sessions = new Map<string, SessionState>();
+
+  const cleanup = () => {
+    for (const [id, session] of sessions.entries()) {
+      if (Date.parse(session.expiresAt) <= Date.now()) {
+        sessions.delete(id);
+      }
+    }
+  };
+
+  const server = Bun.serve({
+    fetch: async (request) => {
+      cleanup();
+      const url = new URL(request.url);
+
+      try {
+        if (request.method === "GET" && url.pathname === "/health") {
+          return json({ ok: true, running: true, vaultPath });
+        }
+
+        if (request.method === "GET" && url.pathname === "/") {
+          return html(page());
+        }
+
+        if (request.method === "POST" && url.pathname === "/api/session/unlock") {
+          const body = await readJson<{ password: string; totp?: string; ttlSeconds?: number }>(request);
+          const ttlSeconds = body.ttlSeconds ?? 3600;
+          if (ttlSeconds <= 0 || ttlSeconds > 86400) {
+            return json({ error: "Session TTL must be between 1 and 86400 seconds" }, 400);
+          }
+          const { rootKey, sealBound } = VaultService.unlockRootKey(vaultPath, {
+            password: body.password,
+            sealRecord: await loadSealRecord(vaultPath),
+            totp: body.totp,
+          });
+          const sessionId = randomBytes(16).toString("hex");
+          const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+          sessions.set(sessionId, { expiresAt, rootKey, sealBound });
+          return json(
+            { expiresAt, sessionId },
+            200,
+            { "set-cookie": `autho_session=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Secure` },
+          );
+        }
+
+        if (request.method === "POST" && url.pathname === "/api/session/lock") {
+          const cookies = parseCookies(request);
+          if (cookies.autho_session) {
+            sessions.delete(cookies.autho_session);
+          }
+          return json({ locked: true }, 200, { "set-cookie": "autho_session=; Max-Age=0; Path=/; Secure" });
+        }
+
+        if (url.pathname.startsWith("/api/")) {
+          const webSession = requireSession(request, sessions);
+          const session = await openSession(vaultPath, webSession);
+          try {
+            if (request.method === "GET" && url.pathname === "/api/status") {
+              return json({
+                initialized: true,
+                secretCount: session.listSecrets().length,
+                unlocked: true,
+                vaultPath,
+              });
+            }
+
+            if (request.method === "GET" && url.pathname === "/api/secrets") {
+              return json({ data: session.listSecretIndex() });
+            }
+
+            if (request.method === "GET" && url.pathname.startsWith("/api/secrets/")) {
+              const ref = decodeURIComponent(url.pathname.slice("/api/secrets/".length));
+              const { linkedFrom, links } = session.getLinks(ref);
+              return json({ data: { ...session.getSecret(ref), linkedFrom, links } });
+            }
+
+            if ((request.method === "POST" || request.method === "DELETE") && url.pathname === "/api/links") {
+              const body = await readJson<{ primary: string; secret: string }>(request);
+              return json({
+                data: request.method === "POST"
+                  ? session.linkSecrets(body.primary, body.secret)
+                  : session.unlinkSecrets(body.primary, body.secret),
+              });
+            }
+
+            if (request.method === "POST" && url.pathname === "/api/secrets") {
+              const body = await readJson<{
+                algorithm?: string;
+                description?: string;
+                digits?: number;
+                name: string;
+                type: string;
+                url?: string;
+                username?: string;
+                value: string;
+              }>(request);
+              return json({
+                data: session.addSecret({
+                  metadata: Object.fromEntries(
+                    Object.entries({
+                      algorithm: body.algorithm,
+                      description: body.description,
+                      digits: body.digits,
+                      url: body.url,
+                    }).filter(([, value]) => value !== undefined),
+                  ),
+                  name: body.name,
+                  type: body.type,
+                  username: body.username,
+                  value: body.value,
+                }),
+              }, 201);
+            }
+
+            if (request.method === "DELETE" && url.pathname.startsWith("/api/secrets/")) {
+              const ref = decodeURIComponent(url.pathname.slice("/api/secrets/".length));
+              return json({ data: session.removeSecret(ref, { withLinked: url.searchParams.get("withLinked") === "1" }) });
+            }
+
+            if (request.method === "GET" && url.pathname.startsWith("/api/otp/")) {
+              const ref = decodeURIComponent(url.pathname.slice("/api/otp/".length));
+              return json({ data: session.generateOtp(ref) });
+            }
+          } finally {
+            await closeSessionAndRecordSeal(vaultPath, session);
+          }
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const status = /session/i.test(message) ? 401 : 400;
+        return json({ error: message }, status);
+      }
+
+      return json({ error: "Not found" }, 404);
+    },
+    hostname: host,
+    port,
+  });
+
+  process.on("SIGINT", () => process.exit(0));
+  process.on("SIGTERM", () => process.exit(0));
+
+  console.log(`Autho web server listening on http://${host}:${server.port}`);
+  await new Promise(() => {});
+}
