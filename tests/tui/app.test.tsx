@@ -216,7 +216,8 @@ describe("Navigation", () => {
     await renderUnlocked();
     t!.mockInput.pressTab();
     await frameContaining("choose");
-    // copy · reveal · open · edit · delete — four quick presses land on delete.
+    // copy · reveal · open · edit · link · delete — five quick presses land on delete.
+    t!.mockInput.pressArrow("right");
     t!.mockInput.pressArrow("right");
     t!.mockInput.pressArrow("right");
     t!.mockInput.pressArrow("right");
@@ -256,6 +257,105 @@ describe("Navigation", () => {
     t!.mockInput.pressArrow("left");
     t!.mockInput.pressEscape();
     await frameContaining("github");
+  });
+});
+
+describe("Links", () => {
+  const OTP_SEED = "JBSWY3DPEHPK3PXP";
+
+  test("shift+L opens the picker and enter links the highlighted secret", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
+    t!.mockInput.pressKey("r");
+    await settle();
+    t!.mockInput.pressKey("L");
+    await frameContaining("Link to github");
+    await t!.mockInput.typeText("otp");
+    t!.mockInput.pressEnter();
+    await frameContaining("Linked github-otp");
+    t!.mockInput.pressEscape();
+    const frame = await frameContaining("press t for the code");
+    expect(frame).toContain("github ·1");
+    expect(sink.current!.getLinks("github").links.map((l) => l.name)).toEqual(["github-otp"]);
+  });
+
+  test("enter on a linked secret in the picker unlinks it", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
+    sink.current!.linkSecrets("github", "github-otp");
+    t!.mockInput.pressKey("r");
+    await frameContaining("press t for the code");
+    t!.mockInput.pressKey("L");
+    await frameContaining("Link to github");
+    t!.mockInput.pressEnter();
+    await frameContaining("Unlinked github-otp");
+    expect(sink.current!.getLinks("github").links).toEqual([]);
+  });
+
+  test("t shows and copies the linked OTP code without revealing the password", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
+    sink.current!.linkSecrets("github", "github-otp");
+    t!.mockInput.pressKey("r");
+    await frameContaining("press t for the code");
+    t!.mockInput.pressKey("t");
+    await frameContaining("OTP code copied");
+    const code = sink.current!.generateOtp("github-otp", { audit: false }).code;
+    expect(copies.at(-1)).toMatch(/^\d{6}$/);
+    const frame = await settle();
+    expect(frame).toContain(`${code.slice(0, 3)} ${code.slice(3)}`);
+    expect(frame).not.toContain(SECRET);
+  });
+
+  test("delete offers to remove linked secrets too", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
+    sink.current!.linkSecrets("github", "github-otp");
+    t!.mockInput.pressKey("r");
+    await frameContaining("press t for the code");
+    t!.mockInput.pressKey("d");
+    await frameContaining("a = also its 1 linked");
+    t!.mockInput.pressKey("a");
+    await frameContaining('Deleted "github" and github-otp');
+    expect(sink.current!.listSecretIndex()).toEqual([]);
+  });
+
+  test("y in the delete prompt keeps the linked secrets", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
+    sink.current!.linkSecrets("github", "github-otp");
+    t!.mockInput.pressKey("r");
+    await frameContaining("press t for the code");
+    t!.mockInput.pressKey("d");
+    await frameContaining("y = only this");
+    t!.mockInput.pressKey("y");
+    await frameContaining('Deleted "github"');
+    expect(sink.current!.listSecretIndex().map((e) => e.name)).toEqual(["github-otp"]);
+  });
+
+  test("the palette goes to a linked secret", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "recovery-codes", type: "note", value: "a b c" });
+    sink.current!.linkSecrets("github", "recovery-codes");
+    t!.mockInput.pressKey("r");
+    await frameContaining("recovery-codes");
+    t!.mockInput.pressKey("k", { ctrl: true });
+    await frameContaining("Commands");
+    await settle();
+    await t!.mockInput.typeText("go to recovery");
+    t!.mockInput.pressEnter();
+    await frameContaining("Linked from  github");
+  });
+
+  test("a linked secret shows which secret links to it", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
+    sink.current!.linkSecrets("github", "github-otp");
+    t!.mockInput.pressKey("r");
+    await settle();
+    t!.mockInput.pressArrow("down");
+    const frame = await frameContaining("Linked from");
+    expect(frame).toContain("Linked from  github");
   });
 });
 

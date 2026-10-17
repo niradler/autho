@@ -140,7 +140,9 @@ Run `autho` with no arguments to open the TUI.
 | `c` | Copy the password, note or current OTP code |
 | `u` | Copy the username |
 | `w` / `o` | Copy / open the URL |
-| `n` / `e` / `d` | New / edit / delete |
+| `n` / `e` / `d` | New / edit / delete (`a` in the delete prompt also deletes linked secrets) |
+| `L` | Link or unlink secrets under the selected one |
+| `t` | Show and copy the linked OTP's code |
 | `,` | Settings |
 | `q` | Quit |
 | `ctrl+k` / `?` | Command palette: every action on the current screen, plus jump to any secret |
@@ -154,6 +156,7 @@ Run `autho` with no arguments to open the TUI.
 - When editing a secret, `ctrl+r` loads the stored value so you can see and change it; leaving the field empty keeps it.
 
 - A value revealed in the editor hides again after the reveal timeout, when you leave the field, or when the palette opens.
+- A secret's linked secrets show on its page; the palette has "Go to" for each one.
 
 ## Settings
 
