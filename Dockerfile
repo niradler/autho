@@ -13,10 +13,12 @@ ARG TARGETARCH
 WORKDIR /src
 # .dockerignore keeps vaults, .env files, node_modules and build output out of the context.
 COPY . .
+# The UI build runs here, so it needs this machine's native packages (Vite's bundler).
+RUN bun install --frozen-lockfile --ignore-scripts && bun run build:ui
+# The binary embeds the TUI's native library, so reinstall for the target CPU.
 RUN CPU=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64) \
- && bun install --frozen-lockfile --ignore-scripts --os=linux --cpu="$CPU"
-RUN TARGET=$([ "$TARGETARCH" = "arm64" ] && echo bun-linux-arm64 || echo bun-linux-x64-baseline) \
- && bun run build:ui \
+ && TARGET=$([ "$TARGETARCH" = "arm64" ] && echo bun-linux-arm64 || echo bun-linux-x64-baseline) \
+ && bun install --frozen-lockfile --ignore-scripts --os=linux --cpu="$CPU" \
  && bun build ./apps/cli/src/index.ts --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig \
       --target="$TARGET" --outfile=/out/autho \
  && mkdir -p /out/data
