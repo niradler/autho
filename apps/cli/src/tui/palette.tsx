@@ -28,8 +28,8 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
 
   useKeyboard((key) => {
     if (key.name === "escape" || (key.ctrl && key.name === "k")) { key.preventDefault(); onClose(); return; }
-    if (key.name === "up" || (key.ctrl && key.name === "p")) { key.preventDefault(); setIndex(Math.max(0, current - 1)); return; }
-    if (key.name === "down" || (key.ctrl && key.name === "n")) { key.preventDefault(); setIndex(Math.min(results.length - 1, current + 1)); return; }
+    if (key.name === "up") { key.preventDefault(); setIndex(Math.max(0, current - 1)); return; }
+    if (key.name === "down") { key.preventDefault(); setIndex(Math.min(results.length - 1, current + 1)); return; }
     if (key.name === "pageup") { key.preventDefault(); setIndex(Math.max(0, current - 10)); return; }
     if (key.name === "pagedown") { key.preventDefault(); setIndex(Math.min(results.length - 1, current + 10)); return; }
     if (isEnter(key)) {

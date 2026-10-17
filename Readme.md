@@ -155,14 +155,14 @@ Run `autho` with no arguments to open the TUI.
 | Key | Action |
 | --- | --- |
 | `/` | Search secrets |
-| `↑↓` `j/k` `PgUp/PgDn` `g/G` | Move |
+| `↑↓` `PgUp/PgDn` `Home/End` | Move |
 | `enter` | Open the selected secret; in the detail view, copy its value |
 | `s` / `space` | Reveal or hide the value |
 | `c` | Copy the password, note or current OTP code |
 | `u` | Copy the username |
 | `w` / `o` | Copy / open the URL |
 | `n` / `e` / `d` | New / edit / delete (`a` in the delete prompt also deletes linked secrets) |
-| `L` | Link or unlink secrets under the selected one |
+| `l` | Link or unlink secrets under the selected one |
 | `t` | Show and copy the linked OTP's code |
 | `,` | Settings |
 | `q` | Quit |
