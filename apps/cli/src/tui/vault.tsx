@@ -13,12 +13,13 @@ type Otp = { id: string; code: string; expiresAt: number };
 /** Wide terminals get a list + preview layout; narrow ones switch between the two. */
 const WIDE_MIN_COLUMNS = 96;
 
-export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setHints, revealMs }: {
+export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSettings, setHints, revealMs }: {
   session: VaultSession;
   /** Secret to select on mount, e.g. the one just created or edited. */
   initialSelectedId?: string;
   onCreate: () => void;
   onEdit: (id: string) => void;
+  onSettings: () => void;
   setHints: (hints: KeyHint[]) => void;
   revealMs: number;
 }) {
@@ -205,6 +206,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
       case "n": onCreate(); return;
       case "q": app.quit(); return;
       case "?": app.openPalette(); return;
+      case ",": onSettings(); return;
       case "r": reload(); app.toast("Reloaded", "info"); return;
     }
     if (!selected) return;
@@ -277,7 +279,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
     let hints: KeyHint[];
     if (confirmDelete) hints = [["y", "delete"], ["n/esc", "cancel"]];
     else if (searchFocused) hints = [["type", "filter"], ["enter/↓", "results"], ["esc", "clear"]];
-    else if (!showDetail) hints = [["↑↓", "move"], ["enter", "open"], ["c", "copy"], ["u", "user"], ["/", "search"], ["n", "new"], ["ctrl+k", "commands"], ["q", "quit"]];
+    else if (!showDetail) hints = [["↑↓", "move"], ["enter", "open"], ["c", "copy"], ["u", "user"], ["/", "search"], ["n", "new"], ["ctrl+k", "commands"], [",", "settings"], ["q", "quit"]];
     else hints = [["enter/c", "copy"], ["u", "user"], ["s", "reveal"], ...(selected?.type === "otp" ? [["o", "code"] as KeyHint] : []), ["e", "edit"], ["d", "delete"], ["/", "search"], ["ctrl+k", "commands"], wide ? ["q", "quit"] : ["esc", "back"]];
     setHints(hints);
   }, [confirmDelete, searchFocused, showDetail, wide, selected?.type, setHints]);

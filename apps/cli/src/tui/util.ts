@@ -21,8 +21,8 @@ export function openUrl(url: string): boolean {
 }
 
 /** Random password from an unambiguous alphabet, using rejection sampling. */
-export function generatePassword(length = 24): string {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*-_=+";
+export function generatePassword(length = 24, symbols = true): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789" + (symbols ? "!@#$%^&*-_=+" : "");
   const limit = 256 - (256 % alphabet.length);
   let out = "";
   while (out.length < length) {

@@ -13,6 +13,8 @@ bun install -g autho
 - Password, note, and OTP secrets (configurable algorithm and digits)
 - Terminal UI via `autho` with no arguments: search, reveal, copy, mouse selection, command palette (Linux, macOS, Windows)
 - Passkey and hardware security key unlock (WebAuthn PRF / FIDO2 hmac-secret)
+- One Settings page in the TUI for paths, unlock methods, timeouts and agent defaults
+- Master password change without re-encrypting secrets
 - Secret CRUD from the Bun CLI
 - OTP code generation (RFC 6238 TOTP)
 - File encryption and decryption (with `--force` overwrite guard)
@@ -134,6 +136,7 @@ Run `autho` with no arguments to open the TUI.
 | `u` | Copy the username |
 | `w` / `o` | Copy / open the URL |
 | `n` / `e` / `d` | New / edit / delete |
+| `,` | Settings |
 | `q` | Quit |
 | `ctrl+k` / `?` | Command palette: every action on the current screen, plus jump to any secret |
 | `ctrl+l` | Lock now |
@@ -145,11 +148,32 @@ Run `autho` with no arguments to open the TUI.
 - Password inputs are always masked; `ctrl+r` shows what you typed.
 - When editing a secret, `ctrl+r` loads the stored value so you can see and change it; leaving the field empty keeps it.
 
-Environment overrides (seconds):
+- A value revealed in the editor hides again after the reveal timeout, when you leave the field, or when the palette opens.
 
-- `AUTHO_TUI_REVEAL_SECONDS` — how long a revealed value stays visible (default 30)
-- `AUTHO_CLIPBOARD_CLEAR_SECONDS` — when copied secrets are cleared (default 30, `0` keeps them)
-- `AUTHO_TUI_LOCK_SECONDS` — idle auto-lock (default 300, `0` disables it)
+## Settings
+
+Press `,` in the TUI (or pick Settings in the palette) for one page with everything configurable:
+
+| Section | What you can do |
+| --- | --- |
+| Storage | See and copy the vault, config, project and daemon paths; point autho at another vault folder |
+| Security | Change the master password, remember it in the OS keychain, set a PIN, turn two-factor codes on or off, add or remove passkeys and security keys, create or revoke the recovery file |
+| Behaviour | Reveal timeout, clipboard clear, auto-lock, generated password length and symbols, mouse |
+| Agents & services | Default lease TTL, daemon session TTL, web UI port |
+| About | Version, runtime, OS secret store |
+
+Security changes ask for the master password (and two-factor code) once per visit; the handle is dropped when you leave Settings. Changing the vault folder only changes the setting — move `vault.db` yourself, then restart autho.
+
+The same settings work from the CLI and are saved in `config.json` (`autho config path`):
+
+```bash
+autho config show                     # every setting, its value and where it comes from
+autho config set revealSeconds 60
+autho config unset revealSeconds      # back to the default
+autho password change                 # prompts; or --new-password / AUTHO_NEW_MASTER_PASSWORD
+```
+
+Environment variables still win over `config.json`: `AUTHO_TUI_REVEAL_SECONDS`, `AUTHO_CLIPBOARD_CLEAR_SECONDS`, `AUTHO_TUI_LOCK_SECONDS` (`0` disables a timer). `autho config show` names the variable when one is in effect.
 
 ## Passkeys And Security Keys
 

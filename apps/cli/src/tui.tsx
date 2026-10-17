@@ -4,21 +4,23 @@ import { createCliRenderer, type CliRenderer } from "@opentui/core";
 import { createRoot, useKeyboard, useRenderer, useSelectionHandler } from "@opentui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { defaultVaultPath } from "../../../packages/core/src/index.ts";
+import { booleanPreference, defaultVaultPath, numberPreference } from "../../../packages/core/src/index.ts";
 import type { SecretRecord, VaultSession } from "../../../packages/core/src/index.ts";
 import { Clipboard } from "./clipboard.ts";
 import { Header, StatusBar, type KeyHint } from "./tui/components.tsx";
-import { AppContext, describeCopy, type AppApi, type Command, type CopyTarget, type Toast, type ToastKind } from "./tui/context.tsx";
+import { AppContext, describeCopy, type AppApi, type Command, type CopyTarget, type Timings, type Toast, type ToastKind } from "./tui/context.tsx";
 import { SecretForm } from "./tui/form.tsx";
 import { CommandPalette } from "./tui/palette.tsx";
-import { TIMINGS, envMs, theme } from "./tui/theme.ts";
+import { SettingsScreen } from "./tui/settings.tsx";
+import { TIMINGS, theme } from "./tui/theme.ts";
 import { UnlockScreen, type PasskeyRunner } from "./tui/unlock.tsx";
 import { VaultScreen } from "./tui/vault.tsx";
 
 type Route =
   | { name: "unlock"; notice?: string }
   | { name: "vault"; focusId?: string }
-  | { name: "form"; editing: SecretRecord | null };
+  | { name: "form"; editing: SecretRecord | null }
+  | { name: "settings" };
 
 export type TuiOptions = {
   vaultPath: string;
@@ -34,8 +36,11 @@ export type TuiOptions = {
   passkeyRunner?: PasskeyRunner;
 };
 
-export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLockMs, onQuit, sessionSink, passkeyRunner }: TuiOptions) {
+export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboardClearMs: initialClipboardClearMs, idleLockMs: initialIdleLockMs, onQuit, sessionSink, passkeyRunner }: TuiOptions) {
   const renderer = useRenderer();
+  const [timings, setTimingsState] = useState<Timings>({ revealMs: initialRevealMs, clipboardClearMs: initialClipboardClearMs, idleLockMs: initialIdleLockMs });
+  const { revealMs, clipboardClearMs, idleLockMs } = timings;
+  const setTimings = useCallback((next: Partial<Timings>) => setTimingsState((prev) => ({ ...prev, ...next })), []);
   const [route, setRoute] = useState<Route>({ name: "unlock" });
   const [session, setSession] = useState<VaultSession | null>(null);
   const [toastState, setToastState] = useState<Toast | null>(null);
@@ -92,9 +97,10 @@ export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLock
     lock: () => lock(),
     quit,
     openPalette,
+    setTimings,
     commandsRef,
     copyTargetRef,
-  }), [paletteOpen, toast, copy, lock, quit, openPalette]);
+  }), [paletteOpen, toast, copy, lock, quit, openPalette, setTimings]);
 
   /**
    * Ctrl+C never exits straight away. The first press copies the mouse
@@ -186,11 +192,14 @@ export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLock
   }, [toast]);
 
   const globalCommands: Command[] = [
-    ...(session ? [{ id: "lock", title: "Lock vault", hint: "ctrl+l", group: "App", run: () => lock() }] : []),
+    ...(session ? [
+      { id: "settings", title: "Settings", hint: ",", group: "App", run: () => setRoute({ name: "settings" }) },
+      { id: "lock", title: "Lock vault", hint: "ctrl+l", group: "App", run: () => lock() },
+    ] : []),
     { id: "quit", title: "Quit", hint: "ctrl+c ×2", group: "App", run: quit },
   ];
 
-  const title = route.name === "unlock" ? "Locked" : route.name === "form" ? (route.editing ? "Edit secret" : "New secret") : "Vault";
+  const title = route.name === "unlock" ? "Locked" : route.name === "form" ? (route.editing ? "Edit secret" : "New secret") : route.name === "settings" ? "Settings" : "Vault";
   const vaultName = basename(vaultPath);
 
   let screen;
@@ -202,10 +211,13 @@ export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLock
         session={session}
         editing={route.editing}
         setHints={setHints}
+        revealMs={revealMs}
         onCancel={() => setRoute({ name: "vault", focusId: route.editing?.id })}
         onDone={(message, id) => { toast(message); setRoute({ name: "vault", focusId: id }); }}
       />
     );
+  } else if (route.name === "settings") {
+    screen = <SettingsScreen vaultPath={vaultPath} setHints={setHints} onBack={() => setRoute({ name: "vault" })} passkeyRunner={passkeyRunner} />;
   } else {
     screen = (
       <VaultScreen
@@ -214,6 +226,7 @@ export function App({ vaultPath, clipboard, revealMs, clipboardClearMs, idleLock
         initialSelectedId={route.focusId}
         onCreate={() => setRoute({ name: "form", editing: null })}
         onEdit={onEdit}
+        onSettings={() => setRoute({ name: "settings" })}
         setHints={setHints}
         revealMs={revealMs}
       />
@@ -251,7 +264,7 @@ function safeRead(target: CopyTarget): string | null {
 
 export async function runTui(vaultPath?: string): Promise<void> {
   const vault = vaultPath ?? defaultVaultPath();
-  const renderer: CliRenderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true });
+  const renderer: CliRenderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: booleanPreference("mouse") });
   const clipboard = new Clipboard({
     osc52: (text) => (text ? renderer.copyToClipboardOSC52(text) : renderer.clearClipboardOSC52()),
   });
@@ -268,9 +281,9 @@ export async function runTui(vaultPath?: string): Promise<void> {
     <App
       vaultPath={vault}
       clipboard={clipboard}
-      revealMs={envMs("AUTHO_TUI_REVEAL_SECONDS", TIMINGS.revealMs)}
-      clipboardClearMs={envMs("AUTHO_CLIPBOARD_CLEAR_SECONDS", TIMINGS.clipboardClearMs)}
-      idleLockMs={envMs("AUTHO_TUI_LOCK_SECONDS", TIMINGS.idleLockMs)}
+      revealMs={numberPreference("revealSeconds") * 1000}
+      clipboardClearMs={numberPreference("clipboardClearSeconds") * 1000}
+      idleLockMs={numberPreference("idleLockSeconds") * 1000}
       onQuit={() => renderer.destroy()}
       sessionSink={sessionSink}
     />,

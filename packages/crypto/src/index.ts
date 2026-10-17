@@ -107,11 +107,11 @@ export function decryptWithKey(
   ]);
 }
 
-export function createVaultConfig(password: string): {
+/** Wraps a new (or, for a password change, the existing) root key under `password`. */
+export function createVaultConfig(password: string, rootKey: Buffer = randomBytes(32)): {
   config: VaultConfig;
   rootKey: Buffer;
 } {
-  const rootKey = randomBytes(32);
   const kdf: VaultKdfConfig = {
     ...DEFAULT_KDF,
     salt: randomBytes(16).toString("base64"),

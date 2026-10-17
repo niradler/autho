@@ -92,6 +92,11 @@ export class AuthoDatabase {
     this.hardenStorageFiles();
   }
 
+  /** Runs `fn` in one SQLite transaction: all of its writes land, or none do. */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
   close(): void {
     this.hardenStorageFiles();
     this.db.close();

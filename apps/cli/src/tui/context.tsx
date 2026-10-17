@@ -2,7 +2,9 @@ import { createContext, useContext, useEffect, useRef } from "react";
 
 import type { CopyResult } from "../clipboard.ts";
 
-export type ToastKind = "success" | "error" | "info";
+export type Timings = { revealMs: number; clipboardClearMs: number; idleLockMs: number };
+
+export type ToastKind ="success" | "error" | "info";
 export type Toast = { message: string; kind: ToastKind };
 
 export type Command = {
@@ -25,6 +27,8 @@ export type AppApi = {
   lock: () => void;
   quit: () => void;
   openPalette: () => void;
+  /** Applies changed TUI timings from Settings without a restart. */
+  setTimings: (next: Partial<Timings>) => void;
   /** Screens publish contextual palette commands and the Ctrl+C copy target. */
   commandsRef: { current: Command[] };
   copyTargetRef: { current: CopyTarget | null };

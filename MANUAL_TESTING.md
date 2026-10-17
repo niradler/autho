@@ -341,3 +341,21 @@ bun run autho -- secrets list --passkey
 - Unsupported browser or authenticator (no PRF) → a clear error, nothing saved.
 - `passkey remove laptop` → `--passkey` no longer accepts that credential.
 
+---
+
+## 10. Settings (TUI)
+
+```bash
+bun run autho
+# unlock, then press ,
+```
+
+- Storage: every path is shown; `enter` copies it. Change the vault folder to an empty directory → toast says there is no vault.db yet and to restart; `config.json` has `vaultDir`. Clear the field → back to `~/.autho`. With `AUTHO_HOME` set the row is read-only.
+- Security: the first change asks for the master password (and code if two-factor is on); later changes in the same visit do not. Leave Settings and come back → it asks again.
+- Change the master password → lock (`ctrl+l`) → the old password fails, the new one works. If the keychain had the password, the device still unlocks silently.
+- Remember password off/on, set and remove a PIN, turn two-factor codes on (scan the key, type the code) and off.
+- Add a passkey (name it, confirm in the browser; `esc` cancels) and remove it.
+- Create a recovery file → it refuses to overwrite an existing file; revoke it.
+- Behaviour: set Reveal timeout to 5 → reveal a value → it hides after 5s without restarting. Out-of-range values show an error and save nothing. With `AUTHO_TUI_REVEAL_SECONDS` set, the row shows the variable and saving warns that it still wins.
+- CLI parity: `autho config show` lists the same values and sources; `autho password change` works without the TUI.
+- Editor: `e` → `ctrl+r` shows the stored value → wait for the reveal timeout, or `tab` away → it hides and the loaded value is cleared.

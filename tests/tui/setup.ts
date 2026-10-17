@@ -1,9 +1,15 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { ReactNode } from "react";
 
 import { testRender } from "@opentui/react/test-utils";
 
 // Never touch the developer's real keychain from tests.
 process.env.AUTHO_DISABLE_OS_SECRETS = "1";
+// ...or the real ~/.autho/config.json, which Settings writes to.
+process.env.AUTHO_HOME = mkdtempSync(join(tmpdir(), "autho-tui-home-"));
 
 /**
  * testRender turns on React's act() environment, but OpenTUI drives updates

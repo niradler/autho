@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { VaultService, type VaultSession } from "../../packages/core/src/index.ts";
+import { VaultService, configFilePath, resetConfigCache, type VaultSession } from "../../packages/core/src/index.ts";
 import { Clipboard, type CommandRunner } from "../../apps/cli/src/clipboard.ts";
 import { App } from "../../apps/cli/src/tui.tsx";
 import type { PasskeyRunner } from "../../apps/cli/src/tui/unlock.tsx";
@@ -48,9 +48,9 @@ async function settle(): Promise<string> {
   return t!.captureCharFrame();
 }
 
-async function renderUnlocked(width = 120): Promise<void> {
+async function renderUnlocked(width = 120, revealMs = 30_000): Promise<void> {
   t = await render(
-    <App vaultPath={vaultPath} clipboard={fakeClipboard()} revealMs={30_000} clipboardClearMs={30_000} idleLockMs={0} onQuit={() => { quits += 1; }} sessionSink={sink} />,
+    <App vaultPath={vaultPath} clipboard={fakeClipboard()} revealMs={revealMs} clipboardClearMs={30_000} idleLockMs={0} onQuit={() => { quits += 1; }} sessionSink={sink} />,
     { width, height: 30, exitOnCtrlC: false },
   );
   await frameContaining("Unlock your vault");
@@ -65,6 +65,8 @@ beforeEach(() => {
   copies = [];
   quits = 0;
   sink = { current: null };
+  rmSync(configFilePath(), { force: true });
+  resetConfigCache();
   VaultService.initialize(vaultPath, PASSWORD);
   const session = VaultService.unlock(vaultPath, PASSWORD);
   session.addSecret({ name: "github", type: "password", username: "octocat", value: SECRET, metadata: { url: "https://github.com" } });
@@ -158,6 +160,17 @@ describe("TUI", () => {
     expect(sink.current!.getSecret("github").value).toBe(`${SECRET}!`);
   });
 
+  test("a value revealed in the editor hides again and is cleared", async () => {
+    await renderUnlocked(120, 300);
+    t!.mockInput.pressKey("e");
+    await frameContaining("leave empty to keep the current value");
+    t!.mockInput.pressKey("r", { ctrl: true });
+    await frameContaining(SECRET);
+    await Bun.sleep(450);
+    const frame = await frameContaining("leave empty to keep the current value");
+    expect(frame).not.toContain(SECRET);
+  });
+
   test("ctrl+k opens the command palette and runs a command", async () => {
     await renderUnlocked();
     t!.mockInput.pressKey("k", { ctrl: true });
@@ -188,5 +201,82 @@ describe("TUI", () => {
     await frameContaining("Waiting for your browser");
     await frameContaining("github");
     expect(requests).toHaveLength(1);
+  });
+});
+
+describe("Settings", () => {
+  async function openSettings(): Promise<void> {
+    await renderUnlocked();
+    t!.mockInput.pressKey(",");
+    await frameContaining("Vault file");
+  }
+
+  async function goToSection(name: string): Promise<string> {
+    for (let i = 0; i < 5; i += 1) {
+      const frame = await settle();
+      if (frame.includes(`› ${name}`)) return frame;
+      t!.mockInput.pressArrow("right");
+    }
+    throw new Error(`Section ${name} not reached`);
+  }
+
+  test("shows where the vault lives", async () => {
+    await openSettings();
+    const frame = await settle();
+    expect(frame).toContain("Config file");
+    expect(frame).toContain("vault.db");
+    t!.mockInput.pressEscape();
+    await frameContaining("github");
+  });
+
+  test("changing the reveal timeout saves it to config.json", async () => {
+    await openSettings();
+    await goToSection("Behaviour");
+    t!.mockInput.pressEnter();
+    await frameContaining("empty resets to 30");
+    t!.mockInput.pressBackspace();
+    t!.mockInput.pressBackspace();
+    await t!.mockInput.typeText("45");
+    t!.mockInput.pressEnter();
+    await frameContaining("Reveal timeout: 45s");
+    expect(JSON.parse(readFileSync(configFilePath(), "utf8")).revealSeconds).toBe(45);
+  });
+
+  test("an out-of-range value is refused and nothing is saved", async () => {
+    await openSettings();
+    await goToSection("Behaviour");
+    t!.mockInput.pressEnter();
+    await frameContaining("empty resets to 30");
+    t!.mockInput.pressBackspace();
+    t!.mockInput.pressBackspace();
+    await t!.mockInput.typeText("1");
+    t!.mockInput.pressEnter();
+    await frameContaining("✗");
+    expect(() => readFileSync(configFilePath(), "utf8")).toThrow();
+  });
+
+  test("changing the master password asks for the current one first", async () => {
+    const next = "a-brand-new-passphrase";
+    await openSettings();
+    await goToSection("Security");
+    t!.mockInput.pressEnter();
+    await frameContaining("Confirm it's you");
+    await t!.mockInput.typeText("wrong-password");
+    t!.mockInput.pressEnter();
+    await frameContaining("✗");
+    await t!.mockInput.typeText(PASSWORD);
+    t!.mockInput.pressEnter();
+    await frameContaining("Change master password");
+    await t!.mockInput.typeText(next);
+    t!.mockInput.pressEnter();
+    await settle();
+    await t!.mockInput.typeText(next);
+    t!.mockInput.pressEnter();
+    await frameContaining("Master password changed");
+    expect(await settle()).not.toContain(next);
+
+    const session = VaultService.unlock(vaultPath, next);
+    session.close();
+    expect(() => VaultService.unlock(vaultPath, PASSWORD)).toThrow();
   });
 });

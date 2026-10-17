@@ -37,15 +37,6 @@ export const TIMINGS = {
   toastMs: 3500,
 };
 
-export function envMs(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) {
-    return fallback;
-  }
-  const seconds = Number(raw);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : fallback;
-}
-
 export function typeLabel(type: string): string {
   switch (type) {
     case "password": return "Login";

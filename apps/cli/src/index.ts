@@ -3,9 +3,10 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { basename, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { CLEAR_COMMAND, runDetachedClear } from "./clipboard.ts";
 import { newPrfSalt, runPasskeyCeremony } from "./passkey.ts";
+import pkg from "../package.json";
 import { confirm, readLine, readPasswordMasked } from "./password.ts";
 
 import {
@@ -22,11 +23,19 @@ import {
   VaultService,
   type UnlockCredentials,
   type AuthoConfig,
+  PREFERENCES,
   authoConfigDir,
+  configFilePath,
   defaultProjectFilePath,
   defaultVaultPath,
+  formatPreference,
   loadConfig,
+  numberPreference,
+  parsePreference,
+  preferenceSpec,
+  resolvePreference,
   saveConfig,
+  setPreference,
   resolveMappings,
   writeProjectConfig,
 } from "../../../packages/core/src/index.ts";
@@ -49,6 +58,70 @@ type ParsedArgs = {
   passthrough: string[];
   positionals: string[];
 };
+
+/** First positional: the command group. */
+enum Scope {
+  Audit = "audit",
+  Config = "config",
+  Daemon = "daemon",
+  Env = "env",
+  Exec = "exec",
+  File = "file",
+  Files = "files",
+  Help = "help",
+  HelpFlag = "--help",
+  Import = "import",
+  Init = "init",
+  Lease = "lease",
+  OsSecrets = "os-secrets",
+  Otp = "otp",
+  Passkey = "passkey",
+  Password = "password",
+  Project = "project",
+  Prompt = "prompt",
+  Recovery = "recovery",
+  Secrets = "secrets",
+  Status = "status",
+  Unlock = "unlock",
+  Version = "version",
+  Web = "web",
+}
+
+/** Second (and third) positional: what to do within a scope. */
+enum Action {
+  Add = "add",
+  Change = "change",
+  Code = "code",
+  Create = "create",
+  Decrypt = "decrypt",
+  Delete = "delete",
+  Edit = "edit",
+  Encrypt = "encrypt",
+  Env = "env",
+  Exec = "exec",
+  Exit = "exit",
+  Generate = "generate",
+  Get = "get",
+  Init = "init",
+  Legacy = "legacy",
+  List = "list",
+  Lock = "lock",
+  Otp = "otp",
+  Path = "path",
+  Read = "read",
+  Remove = "remove",
+  Render = "render",
+  Revoke = "revoke",
+  Rm = "rm",
+  Serve = "serve",
+  Set = "set",
+  Show = "show",
+  Status = "status",
+  Stop = "stop",
+  Sync = "sync",
+  Unlock = "unlock",
+  Unset = "unset",
+}
 
 function parseArgs(argv: string[]): ParsedArgs {
   const dashDashIndex = argv.indexOf("--");
@@ -120,6 +193,15 @@ function requirePositiveInt(value: string, label: string): number {
     throw new Error(`${label} must be a positive integer`);
   }
   return num;
+}
+
+/** `--ttl`, else the defaultLeaseTtl setting; 0 there means --ttl stays required. */
+function leaseTtl(args: ParsedArgs): number {
+  const ttl = getString(args, "ttl");
+  if (ttl) return requirePositiveInt(ttl, "--ttl");
+  const fallback = numberPreference("defaultLeaseTtl");
+  if (fallback > 0) return fallback;
+  return requirePositiveInt(required(ttl, "--ttl"), "--ttl");
 }
 
 function output(value: unknown, jsonMode = false): void {
@@ -218,34 +300,34 @@ async function runPromptMode(vaultPath: string, initialPassword?: string): Promi
     try {
       const action = (await prompt.ask("Action [create/read/list/delete/otp/exit]: ")).toLowerCase();
 
-      if (action === "exit") {
+      if (action === Action.Exit) {
         return;
       }
 
-      if (action === "list") {
+      if (action === Action.List) {
         output(session.listSecrets());
         return;
       }
 
-      if (action === "read") {
+      if (action === Action.Read) {
         const ref = await prompt.ask("Secret ref: ");
         output(session.getSecret(ref));
         return;
       }
 
-      if (action === "delete") {
+      if (action === Action.Delete) {
         const ref = await prompt.ask("Secret ref: ");
         output(session.removeSecret(ref));
         return;
       }
 
-      if (action === "otp") {
+      if (action === Action.Otp) {
         const ref = await prompt.ask("OTP ref: ");
         output(session.generateOtp(ref));
         return;
       }
 
-      if (action === "create") {
+      if (action === Action.Create) {
         const name = await prompt.ask("Name: ");
         const type = (await prompt.ask("Type [password/note/otp]: ")).toLowerCase();
         const value = await prompt.ask("Value: ");
@@ -470,7 +552,7 @@ async function runWebServer(vaultPath: string, args: ParsedArgs): Promise<void> 
   ];
 
   const host = getString(args, "host");
-  const port = getString(args, "port");
+  const port = getString(args, "port") ?? String(numberPreference("webPort"));
   if (host) {
     commandArgs.push("--host", host);
   }
@@ -526,7 +608,7 @@ function help(): string {
     "  secrets rm --ref <name-or-id> [--vault <path>] [--json]",
     "  secrets edit --ref <name-or-id> [--new-name <v>] [--value <v>] [--username <v>] [--url <v>] [--description <v>] [--vault <path>] [--json]",
     "  otp code --ref <name-or-id> [--vault <path>] [--json]",
-    "  lease create --secret <ref> [--secret <ref>] --ttl <seconds> [--name <v>] [--vault <path>] [--json]",
+    "  lease create --secret <ref> [--secret <ref>] [--ttl <seconds>] [--name <v>] [--vault <path>] [--json]",
     "  lease revoke --lease <id> [--vault <path>] [--json]",
     "  env render --map <ENV=ref> [--project-file <path>] [--lease <id>] [--vault <path>] [--json]",
     "  env sync --map <ENV=ref> [--project-file <path>] [--lease <id>] [--ttl <seconds>] [--output <path>] [--force] [--vault <path>] [--json]",
@@ -542,6 +624,7 @@ function help(): string {
     "  passkey add [--label <name>] [--vault <path>] [--json]",
     "  passkey list [--vault <path>] [--json]",
     "  passkey remove <id-or-label> [--vault <path>] [--json]",
+    "  password change [--new-password <value>] [--vault <path>] [--json]",
     "  os-secrets set --name <name> [--value <value>] [--json]",
     "  os-secrets get --name <name> [--json]",
     "  os-secrets delete --name <name> [--json]",
@@ -574,7 +657,10 @@ function help(): string {
     "  Running `autho` with no arguments opens the interactive TUI.",
     "  Config is stored in ~/.autho/config.json (always at ~/.autho).",
     "  The vault directory can be customized via `autho init` or `autho config set vaultDir <path>`.",
-    "  Config keys: vaultDir, defaultLeaseTtl, editor, autoLock, autoLockTimeout",
+    "  Config keys: vaultDir, revealSeconds, clipboardClearSeconds, idleLockSeconds, passwordLength,",
+    "    passwordSymbols, mouse, defaultLeaseTtl, daemonTtlSeconds, webPort (see `autho config show`).",
+    "  lease create uses the defaultLeaseTtl setting when --ttl is omitted (0 = --ttl required).",
+    "  In the TUI, press , for Settings. `autho --version` prints the installed version.",
     "  The default vault path is ~/.autho/vault.db (override with config or AUTHO_HOME).",
     "  The default project file is <vaultDir>/project.json.",
     "  The default daemon state file is <vaultDir>/daemon.json.",
@@ -590,6 +676,10 @@ async function main(): Promise<void> {
 
   const args = parseArgs(process.argv.slice(2));
   const [scope, action, subaction] = args.positionals;
+  if (scope === Scope.Version || (!scope && process.argv.includes("--version"))) {
+    console.log(pkg.version);
+    return;
+  }
   const jsonMode = getBoolean(args, "json");
   const vaultPath = getString(args, "vault") ?? defaultVaultPath();
   const statePath = absolutePath(getString(args, "state-file") ?? defaultDaemonStatePath());
@@ -621,29 +711,29 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "help" || scope === "--help") {
+  if (scope === Scope.Help || scope === Scope.HelpFlag) {
     console.log(help());
     return;
   }
 
-  if (scope === "prompt") {
+  if (scope === Scope.Prompt) {
     await runPromptMode(vaultPath, password);
     return;
   }
 
   // Auto-prompt for password when running interactively and no --password/env var
   if (!password && process.stdin.isTTY && !wantsPasskey(args)) {
-    const needsPassword = [
-      "secrets", "otp", "lease", "env", "exec",
-      "file", "files", "audit", "import", "recovery", "unlock",
-    ].includes(scope);
-    const daemonNeedsPassword = scope === "daemon" && action === "unlock";
+    const needsPassword = ([
+      Scope.Secrets, Scope.Otp, Scope.Lease, Scope.Env, Scope.Exec,
+      Scope.File, Scope.Files, Scope.Audit, Scope.Import, Scope.Recovery, Scope.Unlock,
+    ] as string[]).includes(scope ?? "");
+    const daemonNeedsPassword = scope === Scope.Daemon && action === Action.Unlock;
     if (needsPassword || daemonNeedsPassword) {
       password = await readPasswordMasked("Master password: ");
     }
   }
 
-  if (scope === "init") {
+  if (scope === Scope.Init) {
     let effectiveVaultPath = vaultPath;
 
     // Interactive vault directory selection (first run only, TTY only)
@@ -687,7 +777,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "status") {
+  if (scope === Scope.Status) {
     output(
       VaultService.status(vaultPath, {
         password,
@@ -698,67 +788,78 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "config") {
+  if (scope === Scope.Config) {
     const config = loadConfig();
+    const configKeys = ["vaultDir", "editor", "autoLock", "autoLockTimeout", ...PREFERENCES.map((spec) => spec.key)];
 
-    if (!action || action === "show") {
-      // Show current config
+    if (!action || action === Action.Show) {
+      const preferences = Object.fromEntries(PREFERENCES.map((spec) => [spec.key, resolvePreference(spec.key)]));
       if (jsonMode) {
-        output({ configDir: authoConfigDir(), config }, jsonMode);
+        output({ configDir: authoConfigDir(), config, preferences }, jsonMode);
       } else {
-        console.log(`Config: ${authoConfigDir()}/config.json`);
+        console.log(`Config: ${configFilePath()}`);
         console.log(`Vault dir: ${config.vaultDir ?? authoConfigDir()} ${config.vaultDir ? "(custom)" : "(default)"}`);
-        if (config.defaultLeaseTtl) console.log(`Default lease TTL: ${config.defaultLeaseTtl}`);
         if (config.editor) console.log(`Editor: ${config.editor}`);
-        if (config.autoLock !== undefined) console.log(`Auto-lock: ${config.autoLock}`);
-        if (config.autoLockTimeout) console.log(`Auto-lock timeout: ${config.autoLockTimeout}`);
+        for (const spec of PREFERENCES) {
+          const { value, source } = resolvePreference(spec.key);
+          const from = source === "env" ? ` (from ${spec.env})` : source === "default" ? " (default)" : "";
+          console.log(`${spec.label}: ${formatPreference(spec.key, value)}${from}   [${spec.key}]`);
+        }
       }
       return;
     }
 
-    if (action === "set") {
+    if (action === Action.Set) {
       const key = subaction;
       const value = process.argv[process.argv.indexOf("set") + 2];
       if (!key || value === undefined) {
         console.error("Usage: autho config set <key> <value>");
-        console.error("Keys: vaultDir, defaultLeaseTtl, editor, autoLock, autoLockTimeout");
+        console.error(`Keys: ${configKeys.join(", ")}`);
         process.exit(1);
       }
-      const updated: AuthoConfig = { ...config };
-      if (key === "autoLock") {
-        updated.autoLock = value === "true";
-      } else if (key === "vaultDir") {
-        updated.vaultDir = value;
-      } else if (key === "defaultLeaseTtl") {
-        updated.defaultLeaseTtl = value;
-      } else if (key === "editor") {
-        updated.editor = value;
-      } else if (key === "autoLockTimeout") {
-        updated.autoLockTimeout = value;
+      const spec = preferenceSpec(key);
+      if (spec) {
+        setPreference(spec.key, parsePreference(spec.key, value));
       } else {
-        console.error(`Unknown config key: ${key}`);
-        console.error("Keys: vaultDir, defaultLeaseTtl, editor, autoLock, autoLockTimeout");
-        process.exit(1);
+        const updated: AuthoConfig = { ...config };
+        if (key === "autoLock") {
+          updated.autoLock = value === "true";
+        } else if (key === "vaultDir") {
+          updated.vaultDir = isAbsolute(value) ? value : resolve(value);
+        } else if (key === "editor") {
+          updated.editor = value;
+        } else if (key === "autoLockTimeout") {
+          updated.autoLockTimeout = value;
+        } else {
+          console.error(`Unknown config key: ${key}`);
+          console.error(`Keys: ${configKeys.join(", ")}`);
+          process.exit(1);
+        }
+        saveConfig(updated);
       }
-      saveConfig(updated);
       console.log(`Set ${key} = ${value}`);
       return;
     }
 
-    if (action === "unset") {
+    if (action === Action.Unset) {
       const key = subaction;
       if (!key) {
         console.error("Usage: autho config unset <key>");
         process.exit(1);
       }
-      const updated: AuthoConfig = { ...config };
-      delete updated[key as keyof AuthoConfig];
-      saveConfig(updated);
+      const spec = preferenceSpec(key);
+      if (spec) {
+        setPreference(spec.key, null);
+      } else {
+        const updated: AuthoConfig = { ...config };
+        delete updated[key as keyof AuthoConfig];
+        saveConfig(updated);
+      }
       console.log(`Removed ${key}`);
       return;
     }
 
-    if (action === "path") {
+    if (action === Action.Path) {
       console.log(authoConfigDir() + "/config.json");
       return;
     }
@@ -767,7 +868,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  if (scope === "project" && action === "init") {
+  if (scope === Scope.Project && action === Action.Init) {
     output(
       writeProjectConfig({
         force: getBoolean(args, "force"),
@@ -779,7 +880,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "os-secrets" && action === "set") {
+  if (scope === Scope.OsSecrets && action === Action.Set) {
     const name = required(getString(args, "name"), "--name");
     const value = getString(args, "value") ?? await readPasswordMasked(`Value for "${name}": `);
     const stored = await setOsSecret(name, value);
@@ -790,7 +891,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "os-secrets" && action === "get") {
+  if (scope === Scope.OsSecrets && action === Action.Get) {
     const name = required(getString(args, "name"), "--name");
     const value = await getOsSecret(name);
     if (value === null) {
@@ -800,19 +901,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "os-secrets" && action === "delete") {
+  if (scope === Scope.OsSecrets && action === Action.Delete) {
     const name = required(getString(args, "name"), "--name");
     const deleted = await deleteOsSecret(name);
     output({ deleted, name }, jsonMode);
     return;
   }
 
-  if (scope === "web" && action === "serve") {
+  if (scope === Scope.Web && action === Action.Serve) {
     await runWebServer(vaultPath, args);
     return;
   }
 
-  if (scope === "daemon" && action === "serve") {
+  if (scope === Scope.Daemon && action === Action.Serve) {
     await startDaemonServer({
       host: getString(args, "host") ?? "127.0.0.1",
       port: Number(getString(args, "port") ?? "0"),
@@ -822,24 +923,24 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "daemon" && action === "status") {
+  if (scope === Scope.Daemon && action === Action.Status) {
     output(await daemonStatus({ statePath }), jsonMode);
     return;
   }
 
-  if (scope === "daemon" && action === "unlock") {
+  if (scope === Scope.Daemon && action === Action.Unlock) {
     output(
       await daemonUnlock({
         password: required(password, "--password"),
         statePath,
-        ttlSeconds: getString(args, "ttl") ? Number(getString(args, "ttl")) : undefined,
+        ttlSeconds: getString(args, "ttl") ? Number(getString(args, "ttl")) : numberPreference("daemonTtlSeconds"),
       }),
       jsonMode,
     );
     return;
   }
 
-  if (scope === "daemon" && action === "lock") {
+  if (scope === Scope.Daemon && action === Action.Lock) {
     output(
       await daemonLock({
         sessionId: required(getString(args, "session"), "--session"),
@@ -850,12 +951,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "daemon" && action === "stop") {
+  if (scope === Scope.Daemon && action === Action.Stop) {
     output(await daemonStop({ statePath }), jsonMode);
     return;
   }
 
-  if (scope === "daemon" && action === "env" && subaction === "render") {
+  if (scope === Scope.Daemon && action === Action.Env && subaction === Action.Render) {
     output(
       await daemonRenderEnv({
         leaseId: getString(args, "lease"),
@@ -868,7 +969,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "daemon" && action === "exec") {
+  if (scope === Scope.Daemon && action === Action.Exec) {
     const result = await daemonExec({
       cmd: args.passthrough,
       leaseId: getString(args, "lease"),
@@ -881,7 +982,7 @@ async function main(): Promise<void> {
     process.exit(result.exitCode);
   }
 
-  if (scope === "recovery" && action === "generate") {
+  if (scope === Scope.Recovery && action === Action.Generate) {
     const outputPath = absolutePath(required(getString(args, "output"), "--output"));
     const creds = await resolveUnlockCredentials(vaultPath, args, password);
     const { fileContent } = VaultService.generateRecovery(vaultPath, creds);
@@ -895,14 +996,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "recovery" && action === "revoke") {
+  if (scope === Scope.Recovery && action === Action.Revoke) {
     const creds = await resolveUnlockCredentials(vaultPath, args, password);
     VaultService.revokeRecovery(vaultPath, creds);
     output({ revoked: true }, jsonMode);
     return;
   }
 
-  if (scope === "passkey" && (action === "list" || action === undefined)) {
+  if (scope === Scope.Passkey && (action === Action.List || action === undefined)) {
     const passkeys = VaultService.listPasskeys(vaultPath);
     if (jsonMode) {
       output(passkeys.map(({ id, label, createdAt, transports }) => ({ createdAt, id, label, transports: transports ?? [] })), true);
@@ -917,23 +1018,28 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "passkey" && action === "add") {
-    // Prove access first, so a failed browser step doesn't waste a touch.
-    const creds = await resolveUnlockCredentials(vaultPath, args, password);
-    VaultService.unlock(vaultPath, creds).close();
-    const existing = VaultService.listPasskeys(vaultPath);
-    const prfSalt = newPrfSalt();
-    const result = await runPasskeyCeremony(
-      {
-        mode: "register",
-        userName: `autho (${basename(vaultPath)})`,
-        excludeCredentialIds: existing.map((p) => p.credentialId),
-        prfSalt,
-      },
-      { onUrl: printCeremonyUrl },
-    );
-    const label = getString(args, "label") ?? (process.stdin.isTTY && !jsonMode ? (await readLine("Name for this passkey (e.g. YubiKey, MacBook): ")).trim() : "");
-    const info = VaultService.addPasskey(vaultPath, creds, { ...result, label, prfSalt });
+  if (scope === Scope.Passkey && action === Action.Add) {
+    // Prove access first, so a failed browser step doesn't waste a touch. The
+    // handle outlives the ceremony, so a TOTP code can expire meanwhile.
+    const admin = VaultService.authorize(vaultPath, await resolveUnlockCredentials(vaultPath, args, password));
+    let info;
+    try {
+      const existing = VaultService.listPasskeys(vaultPath);
+      const prfSalt = newPrfSalt();
+      const result = await runPasskeyCeremony(
+        {
+          mode: "register",
+          userName: `autho (${basename(vaultPath)})`,
+          excludeCredentialIds: existing.map((p) => p.credentialId),
+          prfSalt,
+        },
+        { onUrl: printCeremonyUrl },
+      );
+      const label = getString(args, "label") ?? (process.stdin.isTTY && !jsonMode ? (await readLine("Name for this passkey (e.g. YubiKey, MacBook): ")).trim() : "");
+      info = admin.addPasskey({ ...result, label, prfSalt });
+    } finally {
+      admin.close();
+    }
     if (jsonMode) {
       output({ added: true, id: info.id, label: info.label }, true);
     } else {
@@ -942,7 +1048,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "passkey" && (action === "remove" || action === "rm")) {
+  if (scope === Scope.Passkey && (action === Action.Remove || action === Action.Rm)) {
     const ref = required(subaction ?? getString(args, "id"), "<id-or-label>");
     const creds = await resolveUnlockCredentials(vaultPath, args, password);
     const removed = VaultService.removePasskey(vaultPath, creds, ref);
@@ -950,11 +1056,41 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (scope === "passkey") {
+  if (scope === Scope.Passkey) {
     throw new Error(`Unknown passkey action: ${action}. Use add, list or remove.`);
   }
 
-  if (scope === "unlock" && getString(args, "recovery-file")) {
+  if (scope === Scope.Password && action === Action.Change) {
+    const admin = VaultService.authorize(vaultPath, await resolveUnlockCredentials(vaultPath, args, password));
+    try {
+      let next = getString(args, "new-password") ?? process.env.AUTHO_NEW_MASTER_PASSWORD;
+      if (!next && process.stdin.isTTY) {
+        next = await readPasswordMasked("New master password: ");
+        if (next !== await readPasswordMasked("Confirm new password: ")) {
+          throw new Error("Passwords do not match — nothing changed");
+        }
+      }
+      const newPassword = required(next, "--new-password");
+      admin.changePassword(newPassword);
+      // A saved keychain password would stop working, so keep it in step.
+      const keychainUpdated = (await loadVaultPassword(vaultPath)) !== null && (await storeVaultPassword(vaultPath, newPassword));
+      if (jsonMode) {
+        output({ changed: true, keychainUpdated }, true);
+      } else {
+        console.log("Master password changed.");
+        if (keychainUpdated) console.log(`The saved password in ${osKeychainName()} was updated too.`);
+      }
+    } finally {
+      admin.close();
+    }
+    return;
+  }
+
+  if (scope === Scope.Password) {
+    throw new Error(`Unknown password action: ${action}. Use: autho password change`);
+  }
+
+  if (scope === Scope.Unlock && getString(args, "recovery-file")) {
     const recoveryFilePath = absolutePath(getString(args, "recovery-file") as string);
     const content = readFileSync(recoveryFilePath, "utf8");
     // Extract token: find the line after "RECOVERY TOKEN:" and parse hex
@@ -974,7 +1110,7 @@ async function main(): Promise<void> {
   const session = VaultService.unlock(vaultPath, creds);
 
   try {
-    if (scope === "import" && action === "legacy") {
+    if (scope === Scope.Import && action === Action.Legacy) {
       output(
         session.importLegacyFile(absolutePath(required(getString(args, "file"), "--file")), {
           skipExisting: !getBoolean(args, "no-skip-existing"),
@@ -984,7 +1120,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "secrets" && action === "add") {
+    if (scope === Scope.Secrets && action === Action.Add) {
       output(
         session.addSecret({
           metadata: buildSecretMetadata(args),
@@ -998,24 +1134,24 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "secrets" && action === "list") {
+    if (scope === Scope.Secrets && action === Action.List) {
       output(session.listSecrets(), jsonMode);
       return;
     }
 
-    if (scope === "secrets" && action === "get") {
+    if (scope === Scope.Secrets && action === Action.Get) {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
       output(session.getSecret(required(ref, "--ref")), jsonMode);
       return;
     }
 
-    if (scope === "secrets" && action === "rm") {
+    if (scope === Scope.Secrets && action === Action.Rm) {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
       output(session.removeSecret(required(ref, "--ref")), jsonMode);
       return;
     }
 
-    if (scope === "secrets" && action === "edit") {
+    if (scope === Scope.Secrets && action === Action.Edit) {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
       const updates: Record<string, string | Record<string, unknown> | undefined> = {};
       if (getString(args, "new-name")) updates.name = getString(args, "new-name");
@@ -1028,30 +1164,30 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "otp" && action === "code") {
+    if (scope === Scope.Otp && action === Action.Code) {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
       output(session.generateOtp(required(ref, "--ref")), jsonMode);
       return;
     }
 
-    if (scope === "lease" && action === "create") {
+    if (scope === Scope.Lease && action === Action.Create) {
       output(
         session.createLease({
           name: getString(args, "name") ?? "session",
           secretRefs: getStrings(args, "secret"),
-          ttlSeconds: requirePositiveInt(required(getString(args, "ttl"), "--ttl"), "--ttl"),
+          ttlSeconds: leaseTtl(args),
         }),
         jsonMode,
       );
       return;
     }
 
-    if (scope === "lease" && action === "revoke") {
+    if (scope === Scope.Lease && action === Action.Revoke) {
       output(session.revokeLease(required(getString(args, "lease"), "--lease")), jsonMode);
       return;
     }
 
-    if (scope === "env" && action === "render") {
+    if (scope === Scope.Env && action === Action.Render) {
       output(
         session.renderEnv(
           resolveMappings({
@@ -1065,7 +1201,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "env" && action === "sync") {
+    if (scope === Scope.Env && action === Action.Sync) {
       output(
         session.syncEnvFile({
           force: getBoolean(args, "force"),
@@ -1082,7 +1218,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "exec") {
+    if (scope === Scope.Exec) {
       const result = session.runExec({
         cmd: args.passthrough,
         leaseId: getString(args, "lease"),
@@ -1096,7 +1232,7 @@ async function main(): Promise<void> {
       process.exit(result.exitCode);
     }
 
-    if (scope === "file" && action === "encrypt") {
+    if (scope === Scope.File && action === Action.Encrypt) {
       output(
         session.encryptFile(
           absolutePath(required(getString(args, "input"), "--input")),
@@ -1108,7 +1244,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "file" && action === "decrypt") {
+    if (scope === Scope.File && action === Action.Decrypt) {
       output(
         session.decryptFile(
           absolutePath(required(getString(args, "input"), "--input")),
@@ -1120,7 +1256,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "files" && action === "encrypt") {
+    if (scope === Scope.Files && action === Action.Encrypt) {
       output(
         session.encryptFolder(
           absolutePath(required(getString(args, "input"), "--input")),
@@ -1132,7 +1268,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "files" && action === "decrypt") {
+    if (scope === Scope.Files && action === Action.Decrypt) {
       output(
         session.decryptFolder(
           absolutePath(required(getString(args, "input"), "--input")),
@@ -1144,7 +1280,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (scope === "audit" && action === "list") {
+    if (scope === Scope.Audit && action === Action.List) {
       output(session.listAudit(Number(getString(args, "limit") ?? "50")), jsonMode);
       return;
     }

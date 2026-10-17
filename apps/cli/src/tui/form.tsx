@@ -1,7 +1,7 @@
 import { useKeyboard } from "@opentui/react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import type { SecretRecord, SecretType, VaultSession } from "../../../../packages/core/src/index.ts";
+import { booleanPreference, numberPreference, type SecretRecord, type SecretType, type VaultSession } from "../../../../packages/core/src/index.ts";
 import { Button, SecretInput, TextField, type KeyHint } from "./components.tsx";
 import { useApp, useScreenContext, type Command } from "./context.tsx";
 import { theme, typeBadge, typeLabel } from "./theme.ts";
@@ -37,13 +37,15 @@ const LABELS: Record<FieldKey, string> = {
  * loaded when the user asks for it with Ctrl+R; leaving the value field
  * empty keeps it unchanged.
  */
-export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
+export function SecretForm({ session, editing, onDone, onCancel, setHints, revealMs }: {
   session: VaultSession;
   /** Existing secret (without needing its value) when editing; null to create. */
   editing: SecretRecord | null;
   onDone: (message: string, id?: string) => void;
   onCancel: () => void;
   setHints: (hints: KeyHint[]) => void;
+  /** A shown value hides again after this long. */
+  revealMs: number;
 }) {
   const app = useApp();
   const [type, setType] = useState<SecretType>(editing?.type ?? "password");
@@ -60,6 +62,9 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
   const [showValue, setShowValue] = useState(false);
   // Stored value, once loaded on request; saving it back unchanged is a no-op.
   const loadedValue = useRef<string | null>(null);
+  // Latest typed value, for the hide timer which outlives the render that set it.
+  const currentValue = useRef(values.value);
+  currentValue.current = values.value;
 
   const set = (key: Exclude<FieldKey, "type">) => (v: string) => setValues((prev) => ({ ...prev, [key]: v }));
 
@@ -124,13 +129,34 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints }: {
         return;
       }
     }
-    setShowValue((v) => !v);
+    if (showValue) hideValue();
+    else setShowValue(true);
   };
+
+  // Hiding drops a loaded stored value from memory unless the user edited it.
+  const hideValue = () => {
+    setShowValue(false);
+    if (loadedValue.current !== null) {
+      const unchanged = currentValue.current === loadedValue.current;
+      loadedValue.current = null;
+      if (unchanged) set("value")("");
+    }
+  };
+
+  // A shown value hides after revealMs, when focus leaves it, or under the palette.
+  useEffect(() => {
+    if (!showValue) return;
+    if (focus !== "value" || !app.active) { hideValue(); return; }
+    const timer = setTimeout(hideValue, revealMs);
+    return () => clearTimeout(timer);
+  }, [showValue, focus, app.active, revealMs]);
 
   const generate = () => {
     if (type !== "password") return;
-    set("value")(generatePassword());
-    app.toast("Generated a 24-character password — ctrl+r to view it", "info");
+    const length = numberPreference("passwordLength");
+    loadedValue.current = null;
+    set("value")(generatePassword(length, booleanPreference("passwordSymbols")));
+    app.toast(`Generated a ${length}-character password — ctrl+r to view it`, "info");
   };
 
   useKeyboard((key) => {
