@@ -212,10 +212,12 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
     }
   }, [revealed, readValue, revealMs]);
 
-  const remove = useCallback((entry: SecretIndexEntry) => {
+  const remove = useCallback((entry: SecretIndexEntry, withLinked = false) => {
     try {
-      session.removeSecret(entry.id);
-      app.toast(`Deleted "${entry.name}"`);
+      const { removedLinked, keptLinked } = session.removeSecret(entry.id, { withLinked });
+      const also = removedLinked.length ? ` and ${removedLinked.map((l) => l.name).join(", ")}` : "";
+      const kept = keptLinked.length ? ` · kept ${keptLinked.map((l) => l.name).join(", ")} (linked elsewhere)` : "";
+      app.toast(`Deleted "${entry.name}"${also}${kept}`);
       setConfirmDelete(false);
       setDetailOpen(false);
       setPane("list");
@@ -281,6 +283,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
     if (confirmDelete) {
       key.preventDefault();
       if ((key.name === "y" || isEnter(key)) && selected) remove(selected);
+      else if (key.name === "a" && selected && links?.links.length) remove(selected, true);
       else if (key.name === "n" || key.name === "escape") setConfirmDelete(false);
       return;
     }
@@ -382,6 +385,15 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
           { id: "open-url", title: `Open ${hostOf(selected.url)} in browser`, hint: selected.type === "otp" ? undefined : "o", group: "Selected", run: () => open(selected) });
       }
     }
+    for (const link of [...(links?.links ?? []), ...(links?.linkedFrom ?? [])]) {
+      list.push({
+        id: `goto-linked:${link.id}`,
+        title: `Go to ${link.name}`,
+        hint: typeLabel(link.type),
+        group: "Linked",
+        run: () => { setQuery(""); setSelectedId(link.id); },
+      });
+    }
     for (const entry of entries) {
       list.push({
         id: `goto:${entry.id}`,
@@ -392,7 +404,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
       });
     }
     return list;
-  }, [entries, selected, revealed, linkedOtpSecret, onCreate, onEdit, reload, copyPrimary, copyUsername, copyUrl, toggleReveal, copyLinkedOtp]);
+  }, [entries, selected, revealed, links, linkedOtpSecret, onCreate, onEdit, reload, copyPrimary, copyUsername, copyUrl, toggleReveal, copyLinkedOtp]);
 
   useScreenContext(commands, selected ? {
     label: selected.type === "otp" ? "OTP code" : selected.type === "note" ? "Note" : "Password",
@@ -402,13 +414,13 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
 
   useEffect(() => {
     let hints: KeyHint[];
-    if (confirmDelete) hints = [["y", "delete"], ["n/esc", "cancel"]];
+    if (confirmDelete) hints = links?.links.length ? [["y", "delete"], ["a", "with linked"], ["n/esc", "cancel"]] : [["y", "delete"], ["n/esc", "cancel"]];
     else if (searchFocused) hints = [["type", "filter"], ["enter/↓", "results"], ["esc", "clear"]];
     else if (pane === "actions") hints = [["←→", "choose"], ["enter", "run"], ["↑↓", "secret"], ["esc", "back"]];
     else if (!showDetail) hints = [["↑↓", "move"], ["enter", "open"], ["c", "copy"], ["/", "search"], ["n", "new"], ["q", "quit"]];
     else hints = [["↑↓", "move"], ["enter", "copy"], ["→/tab", "actions"], ["/", "search"], ["n", "new"], ["q", "quit"]];
     setHints(hints);
-  }, [confirmDelete, searchFocused, pane, showDetail, setHints]);
+  }, [confirmDelete, links, searchFocused, pane, showDetail, setHints]);
 
   const listWidth = wide ? Math.max(32, Math.floor(width * 0.38)) : width;
   const offset = Math.max(0, Math.min(selectedIndex - Math.floor(listHeight / 2), filtered.length - listHeight));
@@ -587,7 +599,7 @@ function Detail({ entry, revealed, otp, now, confirmDelete, links, linkedOtp, ac
 
       {confirmDelete ? (
         <box backgroundColor={theme.dangerBg} paddingX={1}>
-          <text fg={theme.danger}><strong>Delete "{entry.name}" permanently?</strong><span fg={theme.muted}>  y = delete · n = cancel</span></text>
+          <text fg={theme.danger}><strong>Delete "{entry.name}" permanently?</strong><span fg={theme.muted}>{links?.links.length ? `  y = only this · a = also its ${links.links.length} linked · n = cancel` : "  y = delete · n = cancel"}</span></text>
         </box>
       ) : (
         <box flexDirection="row" gap={1} flexWrap="wrap">

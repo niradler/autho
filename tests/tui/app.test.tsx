@@ -307,6 +307,46 @@ describe("Links", () => {
     expect(frame).not.toContain(SECRET);
   });
 
+  test("delete offers to remove linked secrets too", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
+    sink.current!.linkSecrets("github", "github-otp");
+    t!.mockInput.pressKey("r");
+    await frameContaining("press t for the code");
+    t!.mockInput.pressKey("d");
+    await frameContaining("a = also its 1 linked");
+    t!.mockInput.pressKey("a");
+    await frameContaining('Deleted "github" and github-otp');
+    expect(sink.current!.listSecretIndex()).toEqual([]);
+  });
+
+  test("y in the delete prompt keeps the linked secrets", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
+    sink.current!.linkSecrets("github", "github-otp");
+    t!.mockInput.pressKey("r");
+    await frameContaining("press t for the code");
+    t!.mockInput.pressKey("d");
+    await frameContaining("y = only this");
+    t!.mockInput.pressKey("y");
+    await frameContaining('Deleted "github"');
+    expect(sink.current!.listSecretIndex().map((e) => e.name)).toEqual(["github-otp"]);
+  });
+
+  test("the palette goes to a linked secret", async () => {
+    await renderUnlocked();
+    sink.current!.addSecret({ name: "recovery-codes", type: "note", value: "a b c" });
+    sink.current!.linkSecrets("github", "recovery-codes");
+    t!.mockInput.pressKey("r");
+    await frameContaining("recovery-codes");
+    t!.mockInput.pressKey("k", { ctrl: true });
+    await frameContaining("Commands");
+    await settle();
+    await t!.mockInput.typeText("go to recovery");
+    t!.mockInput.pressEnter();
+    await frameContaining("Linked from  github");
+  });
+
   test("a linked secret shows which secret links to it", async () => {
     await renderUnlocked();
     sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
