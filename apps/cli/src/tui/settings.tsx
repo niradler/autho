@@ -491,22 +491,22 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
     if (key.name === "tab") { key.preventDefault(); setFocus(focus === "nav" ? "rows" : "nav"); return; }
     if (focus === "nav") {
       switch (key.name) {
-        case "up": case "k": switchSection(-1); return;
-        case "down": case "j": switchSection(1); return;
+        case "up": switchSection(-1); return;
+        case "down": switchSection(1); return;
         case "home": pickSection(SECTIONS[0]!); return;
         case "end": pickSection(SECTIONS[SECTIONS.length - 1]!); return;
-        case "right": case "l": case "space": setFocus("rows"); return;
+        case "right": case "space": setFocus("rows"); return;
         case "escape": onBack(); return;
       }
       if (isEnter(key)) setFocus("rows");
       return;
     }
     switch (key.name) {
-      case "up": case "k": moveRow(-1); return;
-      case "down": case "j": moveRow(1); return;
+      case "up": moveRow(-1); return;
+      case "down": moveRow(1); return;
       case "home": setRowIndex(0); return;
       case "end": setRowIndex(rows.length - 1); return;
-      case "left": case "h": case "escape": setFocus("nav"); return;
+      case "left": case "escape": setFocus("nav"); return;
       case "space": row?.run?.(); return;
     }
     if (isEnter(key)) row?.run?.();

@@ -263,12 +263,12 @@ describe("Navigation", () => {
 describe("Links", () => {
   const OTP_SEED = "JBSWY3DPEHPK3PXP";
 
-  test("shift+L opens the picker and enter links the highlighted secret", async () => {
+  test("l opens the picker and enter links the highlighted secret", async () => {
     await renderUnlocked();
     sink.current!.addSecret({ name: "github-otp", type: "otp", value: OTP_SEED });
     t!.mockInput.pressKey("r");
     await settle();
-    t!.mockInput.pressKey("L");
+    t!.mockInput.pressKey("l");
     await frameContaining("Link to github");
     await t!.mockInput.typeText("otp");
     t!.mockInput.pressEnter();
@@ -285,7 +285,7 @@ describe("Links", () => {
     sink.current!.linkSecrets("github", "github-otp");
     t!.mockInput.pressKey("r");
     await frameContaining("press t for the code");
-    t!.mockInput.pressKey("L");
+    t!.mockInput.pressKey("l");
     await frameContaining("Link to github");
     t!.mockInput.pressEnter();
     await frameContaining("Unlinked github-otp");
