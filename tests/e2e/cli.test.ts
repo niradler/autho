@@ -699,6 +699,7 @@ describe("autho rewrite CLI", () => {
     const vaultPath = join(tempRoot, ".autho", "vault.db");
     const password = "correct horse battery staple";
     const port = 18000 + Math.floor(Math.random() * 1000);
+    const base = `http://127.0.0.1:${port}`;
 
     expect(runCli(["init", "--vault", vaultPath, "--password", password]).exitCode).toBe(0);
     runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "github", "--type", "password", "--value", "ghp_example_secret"]);
@@ -706,6 +707,7 @@ describe("autho rewrite CLI", () => {
     const web = Bun.spawn({
       cmd: ["bun", "--no-env-file", "run", "./apps/web/src/index.ts", "serve", "--vault", vaultPath, "--port", String(port)],
       cwd: repoRoot,
+      env: { ...baseEnv, AUTHO_DISABLE_OS_SECRETS: "1", AUTHO_HOME: testAuthoHome },
       stderr: "pipe",
       stdout: "pipe",
     });
@@ -713,86 +715,144 @@ describe("autho rewrite CLI", () => {
     try {
       await waitFor(async () => {
         try {
-          const response = await fetch(`http://127.0.0.1:${port}/health`);
-          return response.ok;
+          return (await fetch(`${base}/health`)).ok;
         } catch {
           return false;
         }
       });
 
-      const pageResponse = await fetch(`http://127.0.0.1:${port}/`);
+      const pageResponse = await fetch(`${base}/`);
       expect(pageResponse.status).toBe(200);
-      expect(await pageResponse.text()).toContain("Autho Local Web");
+      const csp = pageResponse.headers.get("content-security-policy") ?? "";
+      const nonce = /script-src 'nonce-([^']+)'/.exec(csp)?.[1];
+      expect(nonce).toBeTruthy();
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(pageResponse.headers.get("x-frame-options")).toBe("DENY");
+      const html = await pageResponse.text();
+      expect(html).toContain("<title>autho</title>");
+      expect(html).toContain(`<script nonce="${nonce}"`);
 
-      const unlockResponse = await fetch(`http://127.0.0.1:${port}/api/session/unlock`, {
-        body: JSON.stringify({ password }),
+      // Every request must be addressed to a loopback name for this port (DNS rebinding).
+      const rebound = await fetch(`${base}/`, { headers: { host: `evil.example:${port}` } });
+      expect(rebound.status).toBe(421);
+
+      type Call = { body?: unknown; cookie?: string; csrf?: string; headers?: Record<string, string>; method?: string };
+      const api = (path: string, call: Call = {}) =>
+        fetch(`${base}${path}`, {
+          body: call.body === undefined ? undefined : JSON.stringify(call.body),
+          headers: {
+            "x-autho-request": "1",
+            ...(call.body === undefined ? {} : { "content-type": "application/json" }),
+            ...(call.cookie ? { cookie: call.cookie } : {}),
+            ...(call.csrf ? { "x-autho-csrf": call.csrf } : {}),
+            ...call.headers,
+          },
+          method: call.method ?? (call.body === undefined ? "GET" : "POST"),
+        });
+      const unlock = async () => {
+        const response = await api("/api/session/unlock", { body: { method: "password", password } });
+        expect(response.status).toBe(200);
+        const setCookie = response.headers.get("set-cookie") ?? "";
+        expect(setCookie).toContain(`autho_session_${port}=`);
+        expect(setCookie).toContain("HttpOnly");
+        expect(setCookie).toContain("SameSite=Strict");
+        const { data } = (await response.json()) as { data: { csrf: string } };
+        expect(data.csrf.length).toBeGreaterThan(20);
+        return { cookie: cookieHeader(setCookie), csrf: data.csrf };
+      };
+
+      // API calls without the custom header, or from another origin, are refused before anything else.
+      const noHeader = await fetch(`${base}/api/session/unlock`, {
+        body: JSON.stringify({ method: "password", password }),
         headers: { "content-type": "application/json" },
         method: "POST",
       });
-      expect(unlockResponse.status).toBe(200);
-      const cookie = cookieHeader(unlockResponse.headers.get("set-cookie"));
-      expect(cookie).toContain("autho_session=");
+      expect(noHeader.status).toBe(403);
+      expect((await api("/api/session/unlock", { body: { method: "password", password }, headers: { origin: "http://evil.example" } })).status).toBe(403);
+      expect((await api("/api/auth", { headers: { "sec-fetch-site": "cross-site" } })).status).toBe(403);
 
-      const statusResponse = await fetch(`http://127.0.0.1:${port}/api/status`, {
-        headers: { cookie },
-      });
-      expect(statusResponse.status).toBe(200);
-      const statusBody = (await statusResponse.json()) as { secretCount: number };
-      expect(statusBody.secretCount).toBe(1);
+      expect((await api("/api/session/unlock", { body: { method: "password", password: "not the password" } })).status).toBe(401);
 
-      const listResponse = await fetch(`http://127.0.0.1:${port}/api/secrets`, {
-        headers: { cookie },
-      });
+      // The cookie alone is not enough: cookies aren't isolated by port.
+      const first = await unlock();
+      expect((await api("/api/secrets", { cookie: first.cookie })).status).toBe(401);
+      expect((await api("/api/secrets", { cookie: first.cookie, csrf: "wrong-token" })).status).toBe(401);
+
+      const auth = await unlock();
+      const listResponse = await api("/api/secrets", auth);
       expect(listResponse.status).toBe(200);
       const listed = (await listResponse.json()) as { data: Array<{ name: string }> };
-      expect(listed.data[0].name).toBe("github");
+      expect(listed.data.map((s) => s.name)).toEqual(["github"]);
 
-      const createResponse = await fetch(`http://127.0.0.1:${port}/api/secrets`, {
-        body: JSON.stringify({ name: "memo", type: "note", value: "web note" }),
-        headers: { "content-type": "application/json", cookie },
-        method: "POST",
-      });
-      expect(createResponse.status).toBe(201);
+      expect((await api("/api/secrets", { ...auth, body: { name: "memo", type: "note", value: "web note" } })).status).toBe(201);
 
-      const getResponse = await fetch(`http://127.0.0.1:${port}/api/secrets/memo`, {
-        headers: { cookie },
-      });
+      // Detail never carries the value; it only leaves through /reveal.
+      const getResponse = await api("/api/secrets/memo", auth);
       expect(getResponse.status).toBe(200);
-      const secret = (await getResponse.json()) as { data: { value: string } };
-      expect(secret.data.value).toBe("web note");
+      expect(JSON.stringify(await getResponse.json())).not.toContain("web note");
+      const revealResponse = await api("/api/secrets/memo/reveal", { ...auth, method: "POST" });
+      expect(revealResponse.status).toBe(200);
+      expect(((await revealResponse.json()) as { data: { value: string } }).data.value).toBe("web note");
 
-      const changeLink = (method: string) =>
-        fetch(`http://127.0.0.1:${port}/api/links`, {
-          body: JSON.stringify({ primary: "github", secret: "memo" }),
-          headers: { "content-type": "application/json", cookie },
-          method,
-        });
+      const changeLink = (method: string) => api("/api/links", { ...auth, body: { primary: "github", secret: "memo" }, method });
       expect((await changeLink("POST")).status).toBe(200);
-      const linkedResponse = await fetch(`http://127.0.0.1:${port}/api/secrets/github`, { headers: { cookie } });
-      const linked = (await linkedResponse.json()) as { data: { links: Array<{ name: string }> } };
+      const linked = (await (await api("/api/secrets/github", auth)).json()) as { data: { links: Array<{ name: string }> } };
       expect(linked.data.links.map((s) => s.name)).toEqual(["memo"]);
-      const indexed = (await (await fetch(`http://127.0.0.1:${port}/api/secrets`, { headers: { cookie } })).json()) as {
-        data: Array<{ linkCount: number; name: string }>;
-      };
+      const indexed = (await (await api("/api/secrets", auth)).json()) as { data: Array<{ linkCount: number; name: string }> };
       expect(indexed.data.find((s) => s.name === "github")!.linkCount).toBe(1);
       expect((await changeLink("DELETE")).status).toBe(200);
 
-      const deleteResponse = await fetch(`http://127.0.0.1:${port}/api/secrets/memo`, {
-        headers: { cookie },
-        method: "DELETE",
-      });
-      expect(deleteResponse.status).toBe(200);
+      // Security changes need a fresh identity check on top of the session.
+      expect((await api("/api/admin/password", { ...auth, body: { newPassword: "another long password" } })).status).toBe(403);
+      expect((await api("/api/settings/vault-dir", { ...auth, body: { path: tempRoot }, method: "PUT" })).status).toBe(403);
+      expect((await api("/api/settings/preferences/idleLockSeconds", { ...auth, body: { value: 0 }, method: "PUT" })).status).toBe(403);
 
-      const lockResponse = await fetch(`http://127.0.0.1:${port}/api/session/lock`, {
-        headers: { cookie },
-        method: "POST",
-      });
-      expect(lockResponse.status).toBe(200);
+      expect((await api("/api/secrets/memo", { ...auth, method: "DELETE" })).status).toBe(200);
 
-      const unauthorized = await fetch(`http://127.0.0.1:${port}/api/secrets`, {
-        headers: { cookie },
+      expect((await api("/api/session/lock", { ...auth, method: "POST" })).status).toBe(200);
+      expect((await api("/api/secrets", auth)).status).toBe(401);
+
+      // Lock ends the cookie's session even from a tab that lost its CSRF token.
+      const stale = await unlock();
+      expect((await api("/api/session/lock", { cookie: stale.cookie, method: "POST" })).status).toBe(200);
+      expect((await api("/api/secrets", stale)).status).toBe(401);
+    } finally {
+      web.kill();
+      await web.exited;
+    }
+  });
+
+  test("web unlock is throttled after repeated failures", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "autho-web-throttle-"));
+    const vaultPath = join(tempRoot, ".autho", "vault.db");
+    const port = 20000 + Math.floor(Math.random() * 1000);
+    expect(runCli(["init", "--vault", vaultPath, "--password", "correct horse battery staple"]).exitCode).toBe(0);
+
+    const web = Bun.spawn({
+      cmd: ["bun", "--no-env-file", "run", "./apps/web/src/index.ts", "serve", "--vault", vaultPath, "--port", String(port)],
+      cwd: repoRoot,
+      env: { ...baseEnv, AUTHO_DISABLE_OS_SECRETS: "1", AUTHO_HOME: testAuthoHome },
+      stderr: "pipe",
+      stdout: "pipe",
+    });
+
+    try {
+      await waitFor(async () => {
+        try {
+          return (await fetch(`http://127.0.0.1:${port}/health`)).ok;
+        } catch {
+          return false;
+        }
       });
-      expect(unauthorized.status).toBe(401);
+      const attempt = () =>
+        fetch(`http://127.0.0.1:${port}/api/session/unlock`, {
+          body: JSON.stringify({ method: "password", password: "wrong password" }),
+          headers: { "content-type": "application/json", "x-autho-request": "1" },
+          method: "POST",
+        });
+      const statuses: number[] = [];
+      for (let i = 0; i < 6; i++) statuses.push((await attempt()).status);
+      expect(statuses).toEqual([401, 401, 401, 401, 401, 429]);
     } finally {
       web.kill();
       await web.exited;
@@ -833,7 +893,7 @@ describe("autho rewrite CLI", () => {
         }
       });
       const page = await fetch(`http://127.0.0.1:${port}/`);
-      expect(await page.text()).toContain("Autho Local Web");
+      expect(await page.text()).toContain("<title>autho</title>");
     } finally {
       web.kill();
       await web.exited;

@@ -24,5 +24,8 @@
     "packages/crypto/**/*.ts",
     "packages/storage/**/*.ts",
     "tests/**/*.ts"
+  ],
+  "exclude": [
+    "apps/web/ui"
   ]
 }

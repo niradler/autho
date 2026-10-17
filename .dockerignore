@@ -1,0 +1,21 @@
+# Only source goes into the build context. Never vaults, keys or env files.
+**/.autho
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/node_modules
+**/dist
+build
+tmp
+coverage
+.codex-tmp
+.claude
+.git
+.github
+apps/web/src/ui.generated.ts
+Dockerfile
+.dockerignore

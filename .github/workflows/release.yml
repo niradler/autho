@@ -26,7 +26,8 @@ jobs:
           - os: macos-latest
             target: bun-darwin-x64-baseline
             artifact: autho-darwin-x64
-            cross_pkg: "@opentui/core-darwin-x64"
+            # The runner is arm64; pull the x64 native TUI library too.
+            install_args: --cpu=*
           - os: windows-latest
             target: bun-windows-x64
             artifact: autho-windows-x64.exe
@@ -40,14 +41,10 @@ jobs:
         with:
           bun-version: latest
 
-      - run: bun install
+      - run: bun install --frozen-lockfile ${{ matrix.install_args }}
 
-      - name: Install cross-platform native binding
-        if: matrix.cross_pkg
-        run: |
-          npm pack ${{ matrix.cross_pkg }}@0.1.87 --pack-destination /tmp
-          tar -xzf /tmp/*.tgz -C /tmp
-          cp -r /tmp/package node_modules/${{ matrix.cross_pkg }}
+      - name: Build web UI
+        run: bun run build:ui
 
       - name: Build binary
         run: bun build ./apps/cli/src/index.ts --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --target=${{ matrix.target }} --outfile=dist/${{ matrix.artifact }}
@@ -66,6 +63,49 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
+
+  docker:
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    steps:
+      - name: Skip without Docker Hub credentials
+        id: creds
+        run: echo "ok=${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.ok == 'true'
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.creds.outputs.ok == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.creds.outputs.ok == 'true'
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - id: meta
+        if: steps.creds.outputs.ok == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKERHUB_USERNAME }}/autho
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      # The image is built from source in the Dockerfile; .dockerignore keeps vaults and env files out.
+      - uses: docker/build-push-action@v6
+        if: steps.creds.outputs.ok == 'true'
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
 
   release:
     needs: build

@@ -54,7 +54,10 @@ enum Section {
 const SECTIONS: Section[] = [Section.Storage, Section.Security, Section.Behaviour, Section.Agents, Section.About];
 
 const BEHAVIOUR_KEYS: PreferenceKey[] = ["revealSeconds", "clipboardClearSeconds", "idleLockSeconds", "passwordLength", "passwordSymbols", "mouse"];
-const AGENT_KEYS: PreferenceKey[] = ["defaultLeaseTtl", "daemonTtlSeconds", "webPort"];
+const AGENT_KEYS: PreferenceKey[] = ["defaultLeaseTtl", "daemonTtlSeconds", "webPort", "webWithTui"];
+
+/** The web UI the TUI serves alongside itself: its address, or why there is none. */
+export type WebStatus = { url: string | null; note: string };
 
 /** Preferences the running TUI picks up straight away. */
 const LIVE_TIMINGS: Partial<Record<PreferenceKey, keyof Timings>> = {
@@ -100,11 +103,12 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * asks for the master password once per visit; the handle is dropped when
  * the screen closes or the vault locks.
  */
-export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = runPasskeyCeremony }: {
+export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = runPasskeyCeremony, web }: {
   vaultPath: string;
   setHints: (hints: KeyHint[]) => void;
   onBack: () => void;
   passkeyRunner?: PasskeyRunner;
+  web?: WebStatus;
 }) {
   const app = useApp();
   const { width, height } = useTerminalDimensions();
@@ -329,6 +333,15 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
     return rows;
   };
 
+  const webRows = (): Row[] => web ? [{
+    id: "web",
+    label: "Web UI",
+    value: web.url ?? web.note,
+    color: web.url ? theme.text : theme.dim,
+    help: web.url ? `${web.note}; open it in a browser and unlock there. Ctrl+C copies the address` : "Turn on \"Web UI with TUI\" (or run `autho web serve`) to use the browser UI",
+    copy: web.url ?? undefined,
+  }] : [];
+
   const aboutRows = (): Row[] => [
     { id: "version", label: "autho", value: pkg.version, help: "Installed version" },
     { id: "runtime", label: "Runtime", value: `Bun ${Bun.version} · ${process.platform}`, help: "" },
@@ -338,7 +351,7 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
   const rows: Row[] = section === Section.Storage ? storageRows()
     : section === Section.Security ? securityRows()
       : section === Section.Behaviour ? BEHAVIOUR_KEYS.map(preferenceRow)
-        : section === Section.Agents ? AGENT_KEYS.map(preferenceRow)
+        : section === Section.Agents ? [...AGENT_KEYS.map(preferenceRow), ...webRows()]
           : aboutRows();
   const current = Math.min(rowIndex, rows.length - 1);
   const row = rows[current];

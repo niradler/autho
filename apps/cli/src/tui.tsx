@@ -7,12 +7,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { booleanPreference, defaultVaultPath, numberPreference } from "../../../packages/core/src/index.ts";
 import type { SecretRecord, VaultSession } from "../../../packages/core/src/index.ts";
 import { closeSessionAndRecordSeal } from "../../../packages/core/src/os-secrets.ts";
+import { createWebServer, type WebServer } from "../../web/src/server.ts";
 import { Clipboard } from "./clipboard.ts";
 import { Header, StatusBar, type KeyHint } from "./tui/components.tsx";
 import { AppContext, describeCopy, type AppApi, type Command, type CopyTarget, type Timings, type Toast, type ToastKind } from "./tui/context.tsx";
 import { SecretForm } from "./tui/form.tsx";
 import { CommandPalette } from "./tui/palette.tsx";
-import { SettingsScreen } from "./tui/settings.tsx";
+import { SettingsScreen, type WebStatus } from "./tui/settings.tsx";
 import { TIMINGS, theme } from "./tui/theme.ts";
 import { UnlockScreen, type PasskeyRunner } from "./tui/unlock.tsx";
 import { VaultScreen } from "./tui/vault.tsx";
@@ -35,9 +36,11 @@ export type TuiOptions = {
   sessionSink?: { current: VaultSession | null };
   /** Test seam for the browser passkey ceremony. */
   passkeyRunner?: PasskeyRunner;
+  /** The web UI served alongside this TUI, shown in Settings. */
+  web?: WebStatus;
 };
 
-export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboardClearMs: initialClipboardClearMs, idleLockMs: initialIdleLockMs, onQuit, sessionSink, passkeyRunner }: TuiOptions) {
+export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboardClearMs: initialClipboardClearMs, idleLockMs: initialIdleLockMs, onQuit, sessionSink, passkeyRunner, web }: TuiOptions) {
   const renderer = useRenderer();
   const [timings, setTimingsState] = useState<Timings>({ revealMs: initialRevealMs, clipboardClearMs: initialClipboardClearMs, idleLockMs: initialIdleLockMs });
   const { revealMs, clipboardClearMs, idleLockMs } = timings;
@@ -225,7 +228,7 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
       />
     );
   } else if (route.name === "settings") {
-    screen = <SettingsScreen vaultPath={vaultPath} setHints={setHints} onBack={goVault} passkeyRunner={passkeyRunner} />;
+    screen = <SettingsScreen vaultPath={vaultPath} setHints={setHints} onBack={goVault} passkeyRunner={passkeyRunner} web={web} />;
   } else {
     screen = (
       <VaultScreen
@@ -270,8 +273,25 @@ function safeRead(target: CopyTarget): string | null {
   }
 }
 
+/**
+ * Serves the web UI next to the TUI. It keeps its own sessions, so the browser
+ * unlocks separately; a busy port (another autho, `web serve`) just skips it.
+ */
+function startCompanionWeb(vaultPath: string): { server: WebServer | null; status: WebStatus } {
+  if (!booleanPreference("webWithTui")) return { server: null, status: { url: null, note: "off" } };
+  try {
+    const server = createWebServer({ vaultPath });
+    return { server, status: { url: server.url, note: "running while the TUI is open" } };
+  } catch (error) {
+    const busy = (error as { code?: string }).code === "EADDRINUSE";
+    const note = busy ? `not started: port ${numberPreference("webPort")} is in use` : `not started: ${error instanceof Error ? error.message : String(error)}`;
+    return { server: null, status: { url: null, note } };
+  }
+}
+
 export async function runTui(vaultPath?: string): Promise<void> {
   const vault = vaultPath ?? defaultVaultPath();
+  const web = startCompanionWeb(vault);
   const renderer: CliRenderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: booleanPreference("mouse") });
   const clipboard = new Clipboard({
     osc52: (text) => (text ? renderer.copyToClipboardOSC52(text) : renderer.clearClipboardOSC52()),
@@ -280,6 +300,7 @@ export async function runTui(vaultPath?: string): Promise<void> {
   const sessionSink: { current: VaultSession | null } = { current: null };
   // Runs for quit and for signals alike: hand the clipboard clear to a helper and close the DB.
   renderer.once("destroy", () => {
+    web.server?.stop();
     clipboard.handOffPendingClear();
     // The session closes synchronously; the keychain write after it is best effort.
     if (sessionSink.current) void closeSessionAndRecordSeal(vault, sessionSink.current).catch(() => { /* already closed */ });
@@ -295,6 +316,7 @@ export async function runTui(vaultPath?: string): Promise<void> {
       idleLockMs={numberPreference("idleLockSeconds") * 1000}
       onQuit={() => renderer.destroy()}
       sessionSink={sessionSink}
+      web={web.status}
     />,
   );
 }

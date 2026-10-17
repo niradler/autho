@@ -37,6 +37,7 @@ export type AuthoConfig = {
   defaultLeaseTtl?: number | string;
   daemonTtlSeconds?: number;
   webPort?: number;
+  webWithTui?: boolean;
 };
 
 const configCache: { value: AuthoConfig | null; loaded: boolean } = { value: null, loaded: false };

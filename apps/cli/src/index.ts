@@ -32,6 +32,7 @@ import {
   loadConfig,
   numberPreference,
   parsePreference,
+  parseRecoveryFile,
   preferenceSpec,
   resolvePreference,
   saveConfig,
@@ -655,10 +656,11 @@ function help(): string {
     "",
     "Notes:",
     "  Running `autho` with no arguments opens the interactive TUI.",
+    "  While the TUI is open it also serves the web UI on localhost:<webPort> (webWithTui=false to opt out).",
     "  Config is stored in ~/.autho/config.json (always at ~/.autho).",
     "  The vault directory can be customized via `autho init` or `autho config set vaultDir <path>`.",
     "  Config keys: vaultDir, revealSeconds, clipboardClearSeconds, idleLockSeconds, passwordLength,",
-    "    passwordSymbols, mouse, defaultLeaseTtl, daemonTtlSeconds, webPort (see `autho config show`).",
+    "    passwordSymbols, mouse, defaultLeaseTtl, daemonTtlSeconds, webPort, webWithTui (see `autho config show`).",
     "  lease create uses the defaultLeaseTtl setting when --ttl is omitted (0 = --ttl required).",
     "  A lease on a secret also covers the secrets linked to it, read live (--no-links to opt out).",
     "  env and exec inject an OTP secret's current code, never its seed.",
@@ -1126,14 +1128,7 @@ async function main(): Promise<void> {
 
   if (scope === Scope.Unlock && getString(args, "recovery-file")) {
     const recoveryFilePath = absolutePath(getString(args, "recovery-file") as string);
-    const content = readFileSync(recoveryFilePath, "utf8");
-    // Extract token: find the line after "RECOVERY TOKEN:" and parse hex
-    const lines = content.split("\n");
-    const tokenLineIdx = lines.findIndex((l) => l.trim() === "RECOVERY TOKEN:");
-    if (tokenLineIdx === -1) throw new Error("Invalid recovery file format");
-    const rawTokenLine = lines.slice(tokenLineIdx + 1).find((l) => l.trim() !== "") ?? "";
-    const token = rawTokenLine.replace(/-/g, "").toLowerCase();
-    if (!token) throw new Error("Invalid recovery file format: missing token");
+    const token = parseRecoveryFile(readFileSync(recoveryFilePath, "utf8"));
     const recoverySession = VaultService.unlock(vaultPath, { password: "", recovery: token });
     output({ unlocked: true, vaultPath }, jsonMode);
     recoverySession.close();

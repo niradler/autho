@@ -8,6 +8,7 @@ import { VaultService, configFilePath, resetConfigCache, type VaultSession } fro
 import { Clipboard, type CommandRunner } from "../../apps/cli/src/clipboard.ts";
 import { App } from "../../apps/cli/src/tui.tsx";
 import type { PasskeyRunner } from "../../apps/cli/src/tui/unlock.tsx";
+import type { WebStatus } from "../../apps/cli/src/tui/settings.tsx";
 import { render } from "./setup.ts";
 
 const PASSWORD = "correct-horse-battery";
@@ -48,9 +49,9 @@ async function settle(): Promise<string> {
   return t!.captureCharFrame();
 }
 
-async function renderUnlocked(width = 120, revealMs = 30_000): Promise<void> {
+async function renderUnlocked(width = 120, revealMs = 30_000, web?: WebStatus): Promise<void> {
   t = await render(
-    <App vaultPath={vaultPath} clipboard={fakeClipboard()} revealMs={revealMs} clipboardClearMs={30_000} idleLockMs={0} onQuit={() => { quits += 1; }} sessionSink={sink} />,
+    <App vaultPath={vaultPath} clipboard={fakeClipboard()} revealMs={revealMs} clipboardClearMs={30_000} idleLockMs={0} onQuit={() => { quits += 1; }} sessionSink={sink} web={web} />,
     { width, height: 30, exitOnCtrlC: false },
   );
   await frameContaining("Unlock your vault");
@@ -378,6 +379,15 @@ describe("Settings", () => {
     }
     throw new Error(`Section ${name} not reached`);
   }
+
+  test("shows the web UI served alongside the TUI", async () => {
+    await renderUnlocked(120, 30_000, { url: "http://localhost:8061", note: "running while the TUI is open" });
+    t!.mockInput.pressKey(",");
+    await frameContaining("Vault file");
+    const frame = await goToSection("Agents & services");
+    expect(frame).toContain("Web UI with TUI");
+    expect(frame).toContain("http://localhost:8061");
+  });
 
   test("shows where the vault lives", async () => {
     await openSettings();

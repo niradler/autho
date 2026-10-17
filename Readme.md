@@ -8,6 +8,8 @@ Autho is a local-first secret manager for humans and coding agents, rebuilt on B
 bun install -g autho
 ```
 
+Or download a standalone binary for macOS, Linux or Windows from [GitHub Releases](https://github.com/niradler/autho/releases), or run the web UI in [Docker](#docker).
+
 ## What Ships In This Release
 
 - Password, note, and OTP secrets (configurable algorithm and digits)
@@ -26,7 +28,7 @@ bun install -g autho
 - Secret linking: keep a login's OTP, recovery codes or keys together under one primary secret
 - Vault seal: edits made to the SQLite file outside autho are detected and block agent access
 - Local daemon unlock flow for repeated agent tasks
-- Local-only Bun web UI for unlock and secret browsing
+- Local-only web UI with everything the CLI and TUI can do: secrets, links, OTP, leases, audit, settings, passkeys. It also runs alongside the TUI while the TUI is open
 - Native OS secret store integration (macOS Keychain, Linux Secret Service, Windows Credential Manager)
 
 ## Security Model
@@ -121,11 +123,30 @@ Start the daemon:
 bun run daemon
 ```
 
-Start the local web UI:
+Start the local web UI on its own:
 
 ```bash
-bun run web
+autho web serve            # http://localhost:8061
 ```
+
+While the TUI is open it also serves the web UI at `http://localhost:<webPort>` (shown in Settings → Agents & services). The browser unlocks on its own; the server stops when you quit the TUI. If the port is already taken, the TUI just skips it. Turn it off with `autho config set webWithTui false`.
+
+## Docker
+
+The image runs the web UI. It holds only the autho binary: no vault, keys or config. Your vault lives in the `/data` volume, and the OS keychain is off.
+
+```bash
+# create the vault (prompts for a master password)
+docker run --rm -it -v autho-data:/data niradler/autho init
+
+# serve the web UI on http://localhost:8061
+docker run -d --name autho -p 127.0.0.1:8061:8061 -v autho-data:/data niradler/autho
+```
+
+- Publish the port on `127.0.0.1` only. The server answers only requests addressed to `localhost`, so it refuses LAN names and IPs anyway, and the vault should not be reachable from the network.
+- To use another host port, tell the server which one: `-p 127.0.0.1:9000:8061 -e AUTHO_WEB_PUBLIC_PORT=9000`.
+- Any CLI command works too: `docker run --rm -it -v autho-data:/data niradler/autho secrets list`.
+- Back up the `autho-data` volume; it is your vault.
 
 ## Terminal UI
 
@@ -167,7 +188,7 @@ Press `,` in the TUI (or pick Settings in the palette) for one page with everyth
 | Storage | See and copy the vault, config, project and daemon paths; point autho at another vault folder |
 | Security | Change the master password, remember it in the OS keychain, set a PIN, turn two-factor codes on or off, add or remove passkeys and security keys, create or revoke the recovery file |
 | Behaviour | Reveal timeout, clipboard clear, auto-lock, generated password length and symbols, mouse |
-| Agents & services | Default lease TTL, daemon session TTL, web UI port |
+| Agents & services | Default lease TTL, daemon session TTL, web UI port, web UI with the TUI (and its address) |
 | About | Version, runtime, OS secret store |
 
 Security changes ask for the master password (and two-factor code) once per visit; the handle is dropped when you leave Settings. Changing the vault folder only changes the setting — move `vault.db` yourself, then restart autho.

@@ -3,7 +3,7 @@ import { basename, dirname, extname, join, relative } from "node:path";
 
 const repoRoot = process.cwd();
 const sourceRoots = ["apps", "packages", "scripts", "tests"];
-const textExtensions = new Set([".json", ".md", ".ts", ".yml", ".yaml"]);
+const textExtensions = new Set([".css", ".html", ".json", ".md", ".ts", ".tsx", ".yml", ".yaml"]);
 const ignoredDirs = new Set([".codex-tmp", ".git", "dist", "node_modules", "tmp"]);
 
 type QualityMode = "format:check" | "format:write" | "lint" | "typecheck";
@@ -126,6 +126,12 @@ function lintCheck(): void {
 }
 
 async function typecheck(): Promise<void> {
+  // The server embeds the built UI, so build it before bundling anything that imports it.
+  const ui = Bun.spawnSync(["bun", "run", "./scripts/build-ui.ts"], { cwd: repoRoot, stdout: "inherit", stderr: "inherit" });
+  if (ui.exitCode !== 0) {
+    throw new Error("web UI build failed");
+  }
+
   const builds = [
     Bun.build({
       entrypoints: ["./apps/cli/src/index.ts"],
@@ -161,6 +167,12 @@ async function typecheck(): Promise<void> {
   const tsc = Bun.spawnSync(["bun", "x", "tsc", "--noEmit", "-p", "."], { cwd: repoRoot });
   if (tsc.exitCode !== 0) {
     throw new Error(`tsc failed:\n${tsc.stdout.toString()}${tsc.stderr.toString()}`);
+  }
+
+  // The web UI is a browser app with its own JSX runtime and tsconfig.
+  const uiTsc = Bun.spawnSync(["bun", "x", "tsc", "--noEmit", "-p", "ui"], { cwd: join(repoRoot, "apps", "web") });
+  if (uiTsc.exitCode !== 0) {
+    throw new Error(`tsc (web UI) failed:\n${uiTsc.stdout.toString()}${uiTsc.stderr.toString()}`);
   }
 }
 
