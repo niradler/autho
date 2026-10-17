@@ -106,6 +106,8 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
   const app = useApp();
   const { width, height } = useTerminalDimensions();
   const [section, setSection] = useState<Section>(Section.Storage);
+  // Sidebar first, like OS settings: arrows pick a section, → / enter / tab go into it.
+  const [focus, setFocus] = useState<"nav" | "rows">("nav");
   const [rowIndex, setRowIndex] = useState(0);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [error, setError] = useState("");
@@ -453,6 +455,13 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
     setRowIndex(0);
   };
 
+  const pickSection = (next: Section) => {
+    close();
+    setSection(next);
+    setRowIndex(0);
+    setFocus("nav");
+  };
+
   const moveRow = (delta: number) => setRowIndex(Math.min(rows.length - 1, Math.max(0, current + delta)));
 
   useKeyboard((key) => {
@@ -468,31 +477,45 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
       if (key.name === "tab" && fieldCount(dialog, status) > 1) { key.preventDefault(); setField((f) => (f + 1) % 2); }
       return;
     }
+    if (key.name === "q") { onBack(); return; }
+    if (key.name === "tab") { key.preventDefault(); setFocus(focus === "nav" ? "rows" : "nav"); return; }
+    if (focus === "nav") {
+      switch (key.name) {
+        case "up": case "k": switchSection(-1); return;
+        case "down": case "j": switchSection(1); return;
+        case "home": pickSection(SECTIONS[0]!); return;
+        case "end": pickSection(SECTIONS[SECTIONS.length - 1]!); return;
+        case "right": case "l": case "space": setFocus("rows"); return;
+        case "escape": onBack(); return;
+      }
+      if (isEnter(key)) setFocus("rows");
+      return;
+    }
     switch (key.name) {
       case "up": case "k": moveRow(-1); return;
       case "down": case "j": moveRow(1); return;
-      case "left": case "h": switchSection(-1); return;
-      case "right": case "l": switchSection(1); return;
-      case "tab": key.preventDefault(); switchSection(key.shift ? -1 : 1); return;
-      case "escape": case "q": onBack(); return;
+      case "home": setRowIndex(0); return;
+      case "end": setRowIndex(rows.length - 1); return;
+      case "left": case "h": case "escape": setFocus("nav"); return;
       case "space": row?.run?.(); return;
     }
     if (isEnter(key)) row?.run?.();
   });
 
   const commands = useMemo<Command[]>(() => [
-    ...SECTIONS.map((s) => ({ id: `settings:${s}`, title: `Settings — ${s}`, group: "Settings", run: () => { close(); setSection(s); setRowIndex(0); } })),
+    ...SECTIONS.map((s) => ({ id: `settings:${s}`, title: `Settings — ${s}`, group: "Settings", run: () => pickSection(s) })),
     { id: "settings:back", title: "Back to the vault", hint: "esc", group: "Settings", run: onBack },
   ], [onBack]);
-  const copyTarget: CopyTarget | null = row?.copy ? { label: row.label, read: () => row.copy ?? null, secret: false } : null;
+  const copyTarget: CopyTarget | null = focus === "rows" && row?.copy ? { label: row.label, read: () => row.copy ?? null, secret: false } : null;
   useScreenContext(commands, copyTarget);
 
   useEffect(() => {
     if (dialog?.kind === "confirm") setHints([["y", "confirm"], ["n/esc", "cancel"]]);
     else if (dialog?.kind === "passkeyWait") setHints([["esc", "cancel"]]);
     else if (dialog) setHints([["enter", "save"], ...(fieldCount(dialog, status) > 1 ? [["tab", "field"] as KeyHint] : []), ["esc", "cancel"]]);
-    else setHints([["↑↓", "move"], ["←→/tab", "section"], ...(row?.verb ? [["enter", row.verb] as KeyHint] : []), ...(row?.copy && row.verb !== "copy" ? [["ctrl+c", "copy"] as KeyHint] : []), ["esc", "back"]]);
-  }, [dialog, status, row?.verb, row?.copy, setHints]);
+    else if (focus === "nav") setHints([["↑↓", "section"], ["→/enter", "open"], ["esc", "back to vault"]]);
+    else setHints([["↑↓", "move"], ...(row?.verb ? [["enter", row.verb] as KeyHint] : []), ...(row?.copy && row.verb !== "copy" ? [["ctrl+c", "copy"] as KeyHint] : []), ["←/esc", "sections"]]);
+  }, [dialog, status, focus, row?.verb, row?.copy, setHints]);
 
   // ── Render ────────────────────────────────────────────────────────
 
@@ -500,6 +523,7 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
   const offset = Math.max(0, Math.min(current - Math.floor(listHeight / 2), rows.length - listHeight));
   const visible = rows.slice(offset, offset + listHeight);
   const inputsFocused = app.active && dialog !== null;
+  const rowsFocused = focus === "rows" || dialog !== null;
   // Nav, gaps, borders, padding, the label column and the verb.
   const valueWidth = Math.max(12, width - 64);
 
@@ -507,8 +531,8 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
     <box flexDirection="row" flexGrow={1} gap={1} paddingX={1}>
       <box flexDirection="column" width={24} flexShrink={0} border borderStyle="rounded" borderColor={theme.border} title=" Settings " titleColor={theme.muted}>
         {SECTIONS.map((s) => (
-          <box key={s} height={1} paddingX={1} backgroundColor={s === section ? theme.selection : undefined} onMouseDown={() => { close(); setSection(s); setRowIndex(0); }}>
-            <text>{s === section ? <strong fg={theme.accent}>› {s}</strong> : <span fg={theme.text}>  {s}</span>}</text>
+          <box key={s} height={1} paddingX={1} backgroundColor={s === section ? theme.selection : undefined} onMouseDown={() => pickSection(s)}>
+            <text>{s === section ? <strong fg={rowsFocused ? theme.muted : theme.accent}>› {s}</strong> : <span fg={theme.text}>  {s}</span>}</text>
           </box>
         ))}
       </box>
@@ -517,9 +541,9 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
           <text fg={theme.dim}>{admin.current ? "Authorized for this visit — changes apply right away." : "Changes ask for your master password once per visit."}</text>
         ) : null}
         {visible.map((r, i) => {
-          const on = offset + i === current;
+          const on = rowsFocused && offset + i === current;
           return (
-            <box key={r.id} flexDirection="row" height={1} backgroundColor={on ? theme.selection : undefined} onMouseDown={() => { if (dialog) return; if (on) r.run?.(); else setRowIndex(offset + i); }}>
+            <box key={r.id} flexDirection="row" height={1} backgroundColor={on ? theme.selection : undefined} onMouseDown={() => { if (dialog) return; setFocus("rows"); if (on) r.run?.(); else setRowIndex(offset + i); }}>
               <text width={22} flexShrink={0} fg={on ? theme.accent : theme.muted}>{on ? "› " : "  "}{r.label}</text>
               <box flexGrow={1} flexShrink={1} overflow="hidden">
                 <text fg={r.color ?? theme.text} selectable>{r.path ? truncateStart(r.value, valueWidth) : r.value}</text>
@@ -528,7 +552,7 @@ export function SettingsScreen({ vaultPath, setHints, onBack, passkeyRunner = ru
             </box>
           );
         })}
-        {row?.help && !dialog ? <text marginTop={1} fg={theme.dim} wrapMode="word">{row.help}</text> : null}
+        {focus === "rows" && row?.help && !dialog ? <text marginTop={1} fg={theme.dim} wrapMode="word">{row.help}</text> : null}
         {dialog ? (
           <DialogPanel dialog={dialog} totp={status?.totp ?? false} fields={fields} field={field} focused={inputsFocused} error={error}
             onChange={(i, v) => writeFields(fieldsRef.current.map((old, j) => (j === i ? v : old)))}

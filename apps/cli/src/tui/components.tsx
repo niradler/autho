@@ -22,8 +22,12 @@ export function Chip({ label, color = theme.accent }: { label: string; color?: s
 
 export type KeyHint = [key: string, label: string];
 
-/** Bottom bar: shows the latest toast, otherwise the key hints for the screen. */
-export function StatusBar({ hints, toast }: { hints: KeyHint[]; toast: Toast | null }) {
+/**
+ * Bottom bar: shows the latest toast, otherwise the key hints for the screen
+ * on the left and app-wide keys pinned on the right. Pinned hints are never
+ * dropped for space, so global navigation stays discoverable.
+ */
+export function StatusBar({ hints, pinned = [], toast }: { hints: KeyHint[]; pinned?: KeyHint[]; toast: Toast | null }) {
   const { width } = useTerminalDimensions();
   if (toast) {
     const color = toast.kind === "error" ? theme.danger : toast.kind === "info" ? theme.info : theme.success;
@@ -35,15 +39,28 @@ export function StatusBar({ hints, toast }: { hints: KeyHint[]; toast: Toast | n
     );
   }
   return (
-    <box width="100%" height={1} backgroundColor={theme.panel} paddingX={1} flexDirection="row" gap={2} overflow="hidden">
-      {fitHints(hints, width - 2).map(([key, label]) => (
-        <text key={`${key}-${label}`} flexShrink={0}><Chip label={key} /><span fg={theme.muted}> {label}</span></text>
-      ))}
+    <box width="100%" height={1} backgroundColor={theme.panel} paddingX={1} flexDirection="row" justifyContent="space-between" overflow="hidden">
+      <box flexDirection="row" gap={2} flexShrink={1} overflow="hidden">
+        {fitHints(hints, width - 2 - hintsWidth(pinned) - (pinned.length ? 3 : 0)).map(([key, label]) => (
+          <text key={`${key}-${label}`} flexShrink={0}><Chip label={key} /><span fg={theme.muted}> {label}</span></text>
+        ))}
+      </box>
+      {pinned.length ? (
+        <box flexDirection="row" gap={2} flexShrink={0}>
+          {pinned.map(([key, label]) => (
+            <text key={`${key}-${label}`} flexShrink={0}><Chip label={key} /><span fg={theme.muted}> {label}</span></text>
+          ))}
+        </box>
+      ) : null}
     </box>
   );
 }
 
-/** Clickable action; `hotkey` renders as a coloured key cap in front of the label. */
+/** Columns a row of hints takes: " key " chip + " label", 2 apart. */
+function hintsWidth(hints: KeyHint[]): number {
+  return hints.reduce((sum, [key, label], i) => sum + key.length + 2 + 1 + label.length + (i ? 2 : 0), 0);
+}
+
 /** Drops trailing hints that would not fit, instead of cutting one in half. */
 function fitHints(hints: KeyHint[], width: number): KeyHint[] {
   const shown: KeyHint[] = [];
@@ -58,10 +75,14 @@ function fitHints(hints: KeyHint[], width: number): KeyHint[] {
   return shown;
 }
 
-export function Button({ label, hotkey, onPress, color = theme.accent }: { label: string; hotkey?: string; onPress: () => void; color?: string }) {
+/** Clickable action; `hotkey` renders as a coloured key cap in front of the label. */
+export function Button({ label, hotkey, onPress, color = theme.accent, focused = false }: { label: string; hotkey?: string; onPress: () => void; color?: string; focused?: boolean }) {
   return (
-    <box onMouseDown={(event) => { event.preventDefault(); onPress(); }} height={1} flexShrink={0}>
-      <text>{hotkey ? <span bg={color} fg={theme.onAccent}><strong> {hotkey} </strong></span> : null}<span fg={color}> {label} </span></text>
+    <box onMouseDown={(event) => { event.preventDefault(); onPress(); }} height={1} flexShrink={0} backgroundColor={focused ? theme.selection : undefined}>
+      <text>
+        {hotkey ? <span bg={color} fg={theme.onAccent}><strong> {hotkey} </strong></span> : null}
+        {focused ? <strong fg={color}> {label} ‹</strong> : <span fg={color}> {label} </span>}
+      </text>
     </box>
   );
 }
