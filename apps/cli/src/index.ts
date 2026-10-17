@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 
-import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { basename, isAbsolute, resolve } from "node:path";
@@ -56,6 +55,7 @@ import {
   verifyPin,
   deletePin,
 } from "../../../packages/core/src/os-secrets.ts";
+import { startWebServer } from "../../web/src/server.ts";
 
 type ParsedArgs = {
   options: Record<string, boolean | string | string[]>;
@@ -563,36 +563,11 @@ async function runInitWizard(vaultPath: string, password: string, existingCreds?
 }
 
 async function runWebServer(vaultPath: string, args: ParsedArgs): Promise<void> {
-  const commandArgs = [
-    "run",
-    absolutePath("./apps/web/src/index.ts"),
-    "serve",
-    "--vault",
-    absolutePath(vaultPath),
-  ];
-
-  const host = getString(args, "host");
-  const port = getString(args, "port") ?? String(numberPreference("webPort"));
-  if (host) {
-    commandArgs.push("--host", host);
-  }
-  if (port) {
-    commandArgs.push("--port", port);
-  }
-
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const child = spawn(process.execPath, commandArgs, {
-      cwd: process.cwd(),
-      stdio: "inherit",
-    });
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolvePromise();
-        return;
-      }
-      rejectPromise(new Error(`Web server exited with code ${code ?? 1}`));
-    });
-    child.on("error", rejectPromise);
+  // In-process, so it works from the published bundle and not just the repo.
+  await startWebServer({
+    host: getString(args, "host"),
+    port: Number(getString(args, "port") ?? numberPreference("webPort")),
+    vaultPath: absolutePath(vaultPath),
   });
 }
 
