@@ -20,12 +20,23 @@ function tryChmod(path: string, mode: number): void {
 
 // ── Config ────────────────────────────────────────────────────────────
 
+/** config.json. Preference keys are described and validated in settings.ts. */
 export type AuthoConfig = {
   vaultDir?: string;
-  defaultLeaseTtl?: string;
   editor?: string;
+  /** Legacy: `false` turns the idle lock off when idleLockSeconds is unset. */
   autoLock?: boolean;
   autoLockTimeout?: string;
+  revealSeconds?: number;
+  clipboardClearSeconds?: number;
+  idleLockSeconds?: number;
+  passwordLength?: number;
+  passwordSymbols?: boolean;
+  mouse?: boolean;
+  /** Seconds; older configs may hold it as a string. */
+  defaultLeaseTtl?: number | string;
+  daemonTtlSeconds?: number;
+  webPort?: number;
 };
 
 const configCache: { value: AuthoConfig | null; loaded: boolean } = { value: null, loaded: false };

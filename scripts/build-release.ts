@@ -19,7 +19,7 @@ const outfile = `dist/autho-${platform}-${arch}${ext}`;
 await mkdir("dist", { recursive: true });
 
 console.log(`Building ${target} → ${outfile}`);
-await $`bun build ${CLI_ENTRY} --compile --minify --target=${target} --outfile=${outfile}`;
+await $`bun build ${CLI_ENTRY} --compile --minify --no-compile-autoload-dotenv --no-compile-autoload-bunfig --target=${target} --outfile=${outfile}`;
 
 console.log(`\nValidating...`);
 await $`${outfile} help`;

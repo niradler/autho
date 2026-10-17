@@ -26,10 +26,29 @@ function walk(root: string): string[] {
   return files;
 }
 
+// Prefer git's tracked files so build output and stale untracked leftovers are
+// never linted (new files are checked once staged). Falls back to a directory
+// walk outside a git checkout.
+function gitFiles(): string[] | null {
+  const result = Bun.spawnSync(
+    ["git", "ls-files", "--cached", "-z", "--", ...sourceRoots],
+    { cwd: repoRoot, stderr: "ignore" },
+  );
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  return result.stdout
+    .toString()
+    .split("\0")
+    .filter(Boolean)
+    .map((file) => join(repoRoot, file))
+    .filter((file) => !file.split(/[\\/]/).some((part) => ignoredDirs.has(part)))
+    .filter((file) => statSync(file, { throwIfNoEntry: false })?.isFile() ?? false);
+}
+
 function sourceFiles(): string[] {
-  return sourceRoots
-    .flatMap((root) => (statSafe(root) ? walk(join(repoRoot, root)) : []))
-    .filter((file) => textExtensions.has(extname(file)) || basename(file) === "package.json");
+  const files = gitFiles() ?? sourceRoots.flatMap((root) => (statSafe(root) ? walk(join(repoRoot, root)) : []));
+  return files.filter((file) => textExtensions.has(extname(file)) || basename(file) === "package.json");
 }
 
 function statSafe(path: string): boolean {
@@ -112,6 +131,8 @@ async function typecheck(): Promise<void> {
       entrypoints: ["./apps/cli/src/index.ts"],
       outdir: "./tmp/quality/cli",
       target: "bun",
+      // OpenTUI lazy-loads one native package per platform; only this platform's is installed.
+      external: ["@opentui/core", "@opentui/react", "react"],
     }),
     Bun.build({
       entrypoints: ["./apps/daemon/src/index.ts"],
@@ -134,6 +155,12 @@ async function typecheck(): Promise<void> {
 
   if (failures.length > 0 || results.some((result) => !result.success)) {
     throw new Error(failures.join("\n") || "Typecheck build failed");
+  }
+
+  // Bun.build only bundles; tsc is what actually checks types.
+  const tsc = Bun.spawnSync(["bun", "x", "tsc", "--noEmit", "-p", "."], { cwd: repoRoot });
+  if (tsc.exitCode !== 0) {
+    throw new Error(`tsc failed:\n${tsc.stdout.toString()}${tsc.stderr.toString()}`);
   }
 }
 

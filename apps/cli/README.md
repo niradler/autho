@@ -75,7 +75,12 @@ autho daemon lock --session <id> [--state-file <path>] [--json]
 autho daemon stop [--state-file <path>] [--json]
 autho daemon env render --session <id> --map <ENV=ref> [--project-file <path>] [--json]
 autho daemon exec --session <id> --map <ENV=ref> [--project-file <path>] -- <command>
+autho password change [--new-password <value>] [--json]
+autho passkey add|list|remove [--label <name>]
+autho config show|path|set <key> <value>|unset <key>
 ```
+
+Run `autho` with no arguments for the terminal UI; press `,` there for Settings (paths, unlock methods, timeouts, agent defaults).
 
 Run `autho help` for the full reference.
 

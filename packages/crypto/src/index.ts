@@ -2,6 +2,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHmac,
+  hkdfSync,
   randomBytes,
   scryptSync,
 } from "node:crypto";
@@ -58,6 +59,17 @@ export function deriveKeyFromPassword(
   });
 }
 
+/**
+ * HKDF-SHA256 for inputs that are already high-entropy keys, such as a
+ * WebAuthn PRF output. Never use this for passwords: they need scrypt.
+ */
+export function deriveKeyFromSecret(secret: Buffer, salt: Buffer, info: string, length = 32): Buffer {
+  if (secret.length < 32) {
+    throw new Error("Key material must be at least 32 bytes");
+  }
+  return Buffer.from(hkdfSync("sha256", secret, salt, Buffer.from(info, "utf8"), length));
+}
+
 export function encryptWithKey(
   value: Buffer | string,
   key: Buffer,
@@ -95,11 +107,11 @@ export function decryptWithKey(
   ]);
 }
 
-export function createVaultConfig(password: string): {
+/** Wraps a new (or, for a password change, the existing) root key under `password`. */
+export function createVaultConfig(password: string, rootKey: Buffer = randomBytes(32)): {
   config: VaultConfig;
   rootKey: Buffer;
 } {
-  const rootKey = randomBytes(32);
   const kdf: VaultKdfConfig = {
     ...DEFAULT_KDF,
     salt: randomBytes(16).toString("base64"),

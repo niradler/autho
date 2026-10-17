@@ -1,4 +1,4 @@
-# Manual Testing Guide — PIN, TOTP, and Recovery File
+# Manual Testing Guide — PIN, TOTP, Recovery File, TUI and Passkeys
 
 This guide walks through manual verification of the three new security features:
 **PIN**, **TOTP vault unlock**, and **Recovery File**.
@@ -300,3 +300,62 @@ AUTHO_DISABLE_OS_SECRETS=1 bun run autho -- secrets list \
   --totp <current-code>
 # ↳ PIN check is skipped (OS secrets disabled), TOTP still required
 ```
+
+---
+
+## 8. Terminal UI (run on Windows, macOS and Linux)
+
+```bash
+bun run autho
+```
+
+- Unlock: the password stays masked, including pasted text; `ctrl+r` shows it.
+- `c` copies the password → paste it elsewhere → after 30s the clipboard is empty (unless you copied something else).
+- `u` copies the username; `w` copies the URL.
+- `e` edits: the password field starts empty; `ctrl+r` (from any field) loads and shows the stored value, you can edit it, `ctrl+s` saves.
+- `G` jumps to the last secret, `g` to the first.
+- `s` reveals the value; it stays visible for 30s. Drag-select part of it with the mouse → toast "Selected N characters" → `ctrl+c` copies exactly that.
+- `ctrl+c` with nothing selected copies the focused value and shows "ctrl+c again to quit"; a second `ctrl+c` within 2s quits.
+- Quit right after copying → the clipboard is still cleared about 30s later.
+- `ctrl+k` opens the palette: type "lock" → enter → back on the unlock screen.
+- Leave it idle for 5 minutes (or set `AUTHO_TUI_LOCK_SECONDS=10`) → it locks itself.
+- Over SSH with no clipboard tool, copy falls back to OSC 52 (works in most modern terminals).
+
+---
+
+## 9. Passkeys and Security Keys
+
+```bash
+bun run autho -- passkey add --label laptop
+# ↳ Prompts for the master password, opens http://localhost:<port>/<token>
+# ↳ Click Continue → Touch ID / Windows Hello / phone / security key → "Done"
+bun run autho -- passkey list
+bun run autho -- secrets list --passkey
+# ↳ Opens the browser, one touch, lists secrets — no password, PIN or TOTP prompts
+```
+
+- TUI: on the unlock screen press `ctrl+p` → confirm in the browser → vault opens. `esc` cancels.
+- Try a second key: `passkey add --label yubikey` with a FIDO2 key plugged in.
+- Adding the same authenticator again is refused (excluded credential).
+- Opening the printed URL a second time after success shows "already been used".
+- Unsupported browser or authenticator (no PRF) → a clear error, nothing saved.
+- `passkey remove laptop` → `--passkey` no longer accepts that credential.
+
+---
+
+## 10. Settings (TUI)
+
+```bash
+bun run autho
+# unlock, then press ,
+```
+
+- Storage: every path is shown; `enter` copies it. Change the vault folder to an empty directory → toast says there is no vault.db yet and to restart; `config.json` has `vaultDir`. Clear the field → back to `~/.autho`. With `AUTHO_HOME` set the row is read-only.
+- Security: the first change asks for the master password (and code if two-factor is on); later changes in the same visit do not. Leave Settings and come back → it asks again.
+- Change the master password → lock (`ctrl+l`) → the old password fails, the new one works. If the keychain had the password, the device still unlocks silently.
+- Remember password off/on, set and remove a PIN, turn two-factor codes on (scan the key, type the code) and off.
+- Add a passkey (name it, confirm in the browser; `esc` cancels) and remove it.
+- Create a recovery file → it refuses to overwrite an existing file; revoke it.
+- Behaviour: set Reveal timeout to 5 → reveal a value → it hides after 5s without restarting. Out-of-range values show an error and save nothing. With `AUTHO_TUI_REVEAL_SECONDS` set, the row shows the variable and saving warns that it still wins.
+- CLI parity: `autho config show` lists the same values and sources; `autho password change` works without the TUI.
+- Editor: `e` → `ctrl+r` shows the stored value → wait for the reveal timeout, or `tab` away → it hides and the loaded value is cleared.

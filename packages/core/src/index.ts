@@ -10,6 +10,7 @@ import {
   createVaultConfig,
   decryptWithKey,
   deriveKeyFromPassword,
+  deriveKeyFromSecret,
   encryptWithKey,
   generateTotpSecret,
   randomId,
@@ -31,7 +32,7 @@ import {
   encryptFileArtifact,
   encryptFolderArtifact,
 } from "./artifacts.ts";
-import { AuthoDatabase, type AuditRow, type LeaseRow, type SecretRow, type VaultAuth } from "../../storage/src/index.ts";
+import { AuthoDatabase, type AuditRow, type LeaseRow, type SecretRow, type VaultAuth, type VaultPasskey } from "../../storage/src/index.ts";
 import {
   defaultProjectFilePath,
   defaultVaultPath,
@@ -44,7 +45,31 @@ export type UnlockCredentials = {
   password: string;
   totp?: string;
   recovery?: string;
+  /** WebAuthn PRF result from a registered passkey or security key (both base64url). */
+  passkey?: { credentialId: string; prfOutput: string };
 };
+
+/** Public passkey details: safe to show before unlocking. */
+export type PasskeyInfo = Omit<VaultPasskey, "wrappedRootKey">;
+
+const PASSKEY_INFO = "autho:vault-passkey";
+
+function passkeyAad(id: string): string {
+  return `${PASSKEY_INFO}:${id}`;
+}
+
+function passkeyKek(id: string, prfOutput: Buffer): Buffer {
+  // The salt binds the KEK to this registration; the PRF output is the real key material.
+  return deriveKeyFromSecret(prfOutput, Buffer.from(passkeyAad(id), "utf8"), PASSKEY_INFO);
+}
+
+function decodePrfOutput(value: string): Buffer {
+  const bytes = Buffer.from(value, "base64url");
+  if (bytes.length !== 32) {
+    throw new Error("Passkey PRF output must be 32 bytes");
+  }
+  return bytes;
+}
 
 export type SecretRecord = {
   createdAt: string;
@@ -58,6 +83,13 @@ export type SecretRecord = {
 };
 
 export type SecretSummary = Omit<SecretRecord, "metadata" | "username" | "value">;
+
+/** Searchable, non-secret fields for list views. Never carries the secret value. */
+export type SecretIndexEntry = SecretSummary & {
+  description: string | null;
+  url: string | null;
+  username: string | null;
+};
 
 export type AuditEvent = {
   createdAt: string;
@@ -295,7 +327,8 @@ function projectMappingsForStatus(projectFile?: string): { path: string | null; 
   };
 }
 
-export { defaultProjectFilePath, defaultVaultPath, authoConfigDir, configFilePath, loadConfig, saveConfig, resetConfigCache } from "./paths.ts";
+export { defaultProjectFilePath, defaultVaultPath, defaultDaemonStatePath, authoConfigDir, authoHomeDir, configFilePath, loadConfig, saveConfig, resetConfigCache } from "./paths.ts";
+export * from "./settings.ts";
 export type { AuthoConfig } from "./paths.ts";
 
 export function resolveMappings(options: {
@@ -463,6 +496,33 @@ export class VaultService {
       }
     }
 
+    // Passkey path: the authenticator's PRF output is the key material, and
+    // WebAuthn already required user verification (PIN or biometric) on it.
+    if (creds.passkey) {
+      const passkey = vaultAuth?.passkeys?.find((p) => p.credentialId === creds.passkey!.credentialId);
+      if (!passkey) {
+        db.close();
+        throw new Error("This passkey is not registered for this vault");
+      }
+      try {
+        const kek = passkeyKek(passkey.id, decodePrfOutput(creds.passkey.prfOutput));
+        const rootKey = decryptWithKey(passkey.wrappedRootKey, kek, passkeyAad(passkey.id));
+        db.insertAudit({
+          createdAt: new Date().toISOString(),
+          eventType: "auth.unlock.passkey",
+          id: randomId(),
+          message: "Vault unlocked with a passkey",
+          metadata: JSON.stringify({ label: passkey.label, passkeyId: passkey.id }),
+          subjectRef: passkey.id,
+          subjectType: "vault",
+        });
+        return new VaultSession(db, rootKey);
+      } catch (error) {
+        db.close();
+        throw new Error("Passkey did not unlock the vault", { cause: error });
+      }
+    }
+
     // Password path
     try {
       // Derive password KEK once — reused for both TOTP decryption and root key unwrapping
@@ -503,162 +563,299 @@ export class VaultService {
     return { secret, uri };
   }
 
-  static enableTotp(vaultPath: string, credentials: UnlockCredentials, secret: string, code: string): void {
-    if (!verifyTotpCode(secret, code)) {
-      throw new Error("Invalid TOTP code — make sure your authenticator app is showing the right code");
-    }
-    // Verify credentials work (will throw if wrong password/TOTP)
+  /**
+   * Checks the unlock credentials once (password and TOTP, or a passkey or
+   * recovery token) and returns a handle for changing how the vault unlocks.
+   * Callers must close() it; it holds the root key until then.
+   */
+  static authorize(vaultPath: string, credentials: UnlockCredentials): VaultAdmin {
     const session = VaultService.unlock(vaultPath, credentials);
+    const rootKey = session.getRootKey();
     session.close();
+    const viaPassword = !credentials.passkey && !credentials.recovery;
+    return new VaultAdmin(vaultPath, rootKey, viaPassword ? credentials.password : null);
+  }
 
-    // Write TOTP config to vault.auth
-    const db = new AuthoDatabase(vaultPath);
+  private static withAdmin<T>(vaultPath: string, credentials: UnlockCredentials, fn: (admin: VaultAdmin) => T): T {
+    const admin = VaultService.authorize(vaultPath, credentials);
     try {
-      const config = db.getVaultConfig()!;
-      const passwordKEK = deriveKeyFromPassword(credentials.password, config.kdf);
-      const encryptedSecret = encryptWithKey(Buffer.from(secret, "utf8"), passwordKEK, "autho:vault-totp");
-      const existing = db.getVaultAuth();
-      db.setVaultAuth({
-        version: 1,
-        ...existing,
-        totp: {
-          algorithm: "SHA1",
-          digits: 6,
-          encryptedSecret,
-          period: 30,
-        },
-      });
-      db.insertAudit({
-        createdAt: new Date().toISOString(),
-        eventType: "auth.totp.enabled",
-        id: randomId(),
-        message: "TOTP vault unlock enabled",
-        metadata: JSON.stringify({}),
-        subjectRef: null,
-        subjectType: "vault",
-      });
+      return fn(admin);
     } finally {
-      db.close();
+      admin.close();
     }
   }
 
-  static removeTotp(vaultPath: string, credentials: UnlockCredentials): void {
-    const session = VaultService.unlock(vaultPath, credentials);
-    session.close();
+  static enableTotp(vaultPath: string, credentials: UnlockCredentials, secret: string, code: string): void {
+    assertTotpCode(secret, code);
+    VaultService.withAdmin(vaultPath, credentials, (admin) => admin.enableTotp(secret, code));
+  }
 
-    const db = new AuthoDatabase(vaultPath);
-    try {
+  static removeTotp(vaultPath: string, credentials: UnlockCredentials): void {
+    VaultService.withAdmin(vaultPath, credentials, (admin) => admin.removeTotp());
+  }
+
+  static generateRecovery(vaultPath: string, credentials: UnlockCredentials): { fileContent: string } {
+    return VaultService.withAdmin(vaultPath, credentials, (admin) => admin.generateRecovery());
+  }
+
+  static revokeRecovery(vaultPath: string, credentials: UnlockCredentials): void {
+    VaultService.withAdmin(vaultPath, credentials, (admin) => admin.revokeRecovery());
+  }
+
+  static changePassword(vaultPath: string, credentials: UnlockCredentials, newPassword: string): void {
+    VaultService.withAdmin(vaultPath, credentials, (admin) => admin.changePassword(newPassword));
+  }
+
+  static listPasskeys(vaultPath: string): PasskeyInfo[] {
+    return (VaultService.getAuthConfig(vaultPath)?.passkeys ?? []).map(({ wrappedRootKey: _key, ...info }) => info);
+  }
+
+  /**
+   * Registers a passkey: the root key is wrapped with a key derived from the
+   * authenticator's PRF output. Requires normal unlock credentials first.
+   */
+  static addPasskey(vaultPath: string, credentials: UnlockCredentials, input: PasskeyInput): PasskeyInfo {
+    return VaultService.withAdmin(vaultPath, credentials, (admin) => admin.addPasskey(input));
+  }
+
+  /** Removes a passkey by id or label. Requires unlock credentials. */
+  static removePasskey(vaultPath: string, credentials: UnlockCredentials, ref: string): PasskeyInfo {
+    return VaultService.withAdmin(vaultPath, credentials, (admin) => admin.removePasskey(ref));
+  }
+}
+
+export type PasskeyInput = { credentialId: string; label: string; prfSalt: string; prfOutput: string; transports?: string[] };
+
+/** Minimum length for a changed master password. */
+export const MIN_PASSWORD_LENGTH = 8;
+
+function assertTotpCode(secret: string, code: string): void {
+  if (!verifyTotpCode(secret, code)) {
+    throw new Error("Invalid TOTP code — make sure your authenticator app is showing the right code");
+  }
+}
+
+/**
+ * Changes how a vault unlocks: password, TOTP, passkeys and the recovery
+ * token. Made by VaultService.authorize after a full credential check, so a
+ * settings screen can make several changes without re-entering a TOTP code
+ * that has since expired. Every change is audited.
+ */
+export class VaultAdmin {
+  private closed = false;
+
+  constructor(
+    readonly vaultPath: string,
+    private rootKey: Buffer,
+    /** Null when authorized with a passkey or recovery token. */
+    private password: string | null,
+  ) {}
+
+  /** True when authorized with the master password (needed for TOTP and keychain changes). */
+  get hasPassword(): boolean {
+    return this.password !== null;
+  }
+
+  /** The master password this handle was authorized with, e.g. to save it to the OS keychain. */
+  masterPassword(): string {
+    return this.requirePassword("This needs the master password");
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.rootKey.fill(0);
+    this.password = null;
+  }
+
+  enableTotp(secret: string, code: string): void {
+    assertTotpCode(secret, code);
+    const password = this.requirePassword("Two-factor codes need the master password — authorize with it, not a passkey or recovery file");
+    this.write((db) => {
+      const passwordKEK = deriveKeyFromPassword(password, db.getVaultConfig()!.kdf);
+      const encryptedSecret = encryptWithKey(Buffer.from(secret, "utf8"), passwordKEK, "autho:vault-totp");
+      db.setVaultAuth({
+        version: 1,
+        ...db.getVaultAuth(),
+        totp: { algorithm: "SHA1", digits: 6, encryptedSecret, period: 30 },
+      });
+      audit(db, "auth.totp.enabled", "TOTP vault unlock enabled");
+    });
+  }
+
+  removeTotp(): void {
+    this.write((db) => {
       const existing = db.getVaultAuth();
       if (existing) {
         const { totp: _removed, ...rest } = existing;
         db.setVaultAuth({ ...rest, version: 1 });
       }
-      db.insertAudit({
-        createdAt: new Date().toISOString(),
-        eventType: "auth.totp.removed",
-        id: randomId(),
-        message: "TOTP vault unlock removed",
-        metadata: JSON.stringify({}),
-        subjectRef: null,
-        subjectType: "vault",
-      });
-    } finally {
-      db.close();
-    }
+      audit(db, "auth.totp.removed", "TOTP vault unlock removed");
+    });
   }
 
-  static generateRecovery(vaultPath: string, credentials: UnlockCredentials): { fileContent: string } {
-    const session = VaultService.unlock(vaultPath, credentials);
-    const rootKey = session.getRootKey();
-    session.close();
+  /**
+   * Re-wraps the root key under a new password; secrets are untouched.
+   * The TOTP secret is re-encrypted too, which needs the old password.
+   */
+  changePassword(newPassword: string): void {
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      throw new Error(`The new password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+    }
+    this.write((db) => {
+      const auth = db.getVaultAuth();
+      const { config } = createVaultConfig(newPassword, this.liveRootKey());
+      if (auth?.totp) {
+        const oldPassword = this.requirePassword("Two-factor codes are on: authorize with the current master password to change it");
+        const oldKEK = deriveKeyFromPassword(oldPassword, db.getVaultConfig()!.kdf);
+        const secret = decryptWithKey(auth.totp.encryptedSecret, oldKEK, "autho:vault-totp");
+        const newKEK = deriveKeyFromPassword(newPassword, config.kdf);
+        db.setVaultAuth({ ...auth, version: 1, totp: { ...auth.totp, encryptedSecret: encryptWithKey(secret, newKEK, "autho:vault-totp") } });
+      }
+      db.setVaultConfig(config);
+      audit(db, "auth.password.changed", "Master password changed");
+    });
+    this.password = newPassword;
+  }
 
-    const db = new AuthoDatabase(vaultPath);
-    try {
-      const tokenBytes = randomBytes(32);
-      const token = tokenBytes.toString("hex");
-
-      const recoverySalt = randomBytes(16).toString("base64");
+  generateRecovery(): { fileContent: string } {
+    return this.write((db) => {
+      const token = randomBytes(32).toString("hex");
       const recoveryKdf: VaultKdfConfig = {
         keyLength: 32,
         name: "scrypt",
-        salt: recoverySalt,
+        salt: randomBytes(16).toString("base64"),
         N: 1 << 17,
         p: 1,
         r: 8,
       };
-      const recoveryKEK = deriveKeyFromPassword(token, recoveryKdf);
-      const wrappedRootKey = encryptWithKey(rootKey, recoveryKEK, "autho:vault-recovery");
-
-      const existing = db.getVaultAuth();
+      const wrappedRootKey = encryptWithKey(this.liveRootKey(), deriveKeyFromPassword(token, recoveryKdf), "autho:vault-recovery");
       db.setVaultAuth({
         version: 1,
-        ...existing,
-        recovery: {
-          createdAt: new Date().toISOString(),
-          kdf: recoveryKdf,
-          wrappedRootKey,
-        },
+        ...db.getVaultAuth(),
+        recovery: { createdAt: new Date().toISOString(), kdf: recoveryKdf, wrappedRootKey },
       });
-
-      const formattedToken = token.toUpperCase().match(/.{1,8}/g)!.join("-");
-      const fileContent = [
-        "================================================================================",
-        "AUTHO VAULT RECOVERY FILE",
-        "================================================================================",
-        `Generated : ${new Date().toISOString()}`,
-        `Vault     : ${vaultPath}`,
-        "",
-        "WARNING: Anyone with this file can open your vault regardless of password,",
-        "PIN, or authenticator app. Store it offline (printed paper, encrypted USB,",
-        "safety deposit box). Revoke with: autho recovery revoke",
-        "",
-        "RECOVERY TOKEN:",
-        formattedToken,
-        "",
-        "To use: autho unlock --recovery-file <path-to-this-file>",
-        "================================================================================",
-      ].join("\n");
-
-      db.insertAudit({
-        createdAt: new Date().toISOString(),
-        eventType: "auth.recovery.generated",
-        id: randomId(),
-        message: "Recovery file generated",
-        metadata: JSON.stringify({}),
-        subjectRef: null,
-        subjectType: "vault",
-      });
-
-      return { fileContent };
-    } finally {
-      db.close();
-    }
+      audit(db, "auth.recovery.generated", "Recovery file generated");
+      return { fileContent: recoveryFileContent(this.vaultPath, token) };
+    });
   }
 
-  static revokeRecovery(vaultPath: string, credentials: UnlockCredentials): void {
-    const session = VaultService.unlock(vaultPath, credentials);
-    session.close();
-
-    const db = new AuthoDatabase(vaultPath);
-    try {
+  revokeRecovery(): void {
+    this.write((db) => {
       const existing = db.getVaultAuth();
       if (existing) {
         const { recovery: _removed, ...rest } = existing;
         db.setVaultAuth({ ...rest, version: 1 });
       }
-      db.insertAudit({
+      audit(db, "auth.recovery.revoked", "Recovery file revoked");
+    });
+  }
+
+  addPasskey(input: PasskeyInput): PasskeyInfo {
+    const prfOutput = decodePrfOutput(input.prfOutput);
+    if (Buffer.from(input.prfSalt, "base64url").length < 16) {
+      throw new Error("Passkey PRF salt must be at least 16 bytes");
+    }
+    return this.write((db) => {
+      const existing = db.getVaultAuth();
+      const passkeys = existing?.passkeys ?? [];
+      if (passkeys.some((p) => p.credentialId === input.credentialId)) {
+        throw new Error("This passkey is already registered");
+      }
+      const id = randomId(8);
+      const label = input.label.trim() || `Passkey ${passkeys.length + 1}`;
+      const draft: VaultPasskey = {
         createdAt: new Date().toISOString(),
-        eventType: "auth.recovery.revoked",
-        id: randomId(),
-        message: "Recovery file revoked",
-        metadata: JSON.stringify({}),
-        subjectRef: null,
-        subjectType: "vault",
-      });
+        credentialId: input.credentialId,
+        id,
+        label,
+        prfSalt: input.prfSalt,
+        transports: input.transports?.length ? input.transports : undefined,
+        wrappedRootKey: encryptWithKey(this.liveRootKey(), passkeyKek(id, prfOutput), passkeyAad(id)),
+      };
+      db.setVaultAuth({ version: 1, ...existing, passkeys: [...passkeys, draft] });
+      audit(db, "auth.passkey.added", "Passkey added", { label, passkeyId: id }, id);
+      const { wrappedRootKey: _key, ...info } = draft;
+      return info;
+    });
+  }
+
+  removePasskey(ref: string): PasskeyInfo {
+    return this.write((db) => {
+      const existing = db.getVaultAuth();
+      const passkeys = existing?.passkeys ?? [];
+      const matches = passkeys.filter((p) => p.id === ref || p.label === ref);
+      if (matches.length === 0) {
+        throw new Error(`No passkey matches "${ref}"`);
+      }
+      if (matches.length > 1) {
+        throw new Error(`"${ref}" matches several passkeys — use the id from \`autho passkey list\``);
+      }
+      const removed = matches[0]!;
+      db.setVaultAuth({ ...existing!, version: 1, passkeys: passkeys.filter((p) => p !== removed) });
+      audit(db, "auth.passkey.removed", "Passkey removed", { label: removed.label, passkeyId: removed.id }, removed.id);
+      const { wrappedRootKey: _key, ...info } = removed;
+      return info;
+    });
+  }
+
+  private liveRootKey(): Buffer {
+    if (this.closed) {
+      throw new Error("Authorization expired — confirm your password again");
+    }
+    return this.rootKey;
+  }
+
+  private requirePassword(message: string): string {
+    this.liveRootKey();
+    if (this.password === null) {
+      throw new Error(message);
+    }
+    return this.password;
+  }
+
+  private write<T>(fn: (db: AuthoDatabase) => T): T {
+    this.liveRootKey();
+    const db = new AuthoDatabase(this.vaultPath);
+    try {
+      return db.transaction(() => fn(db));
     } finally {
       db.close();
     }
   }
+}
+
+function audit(db: AuthoDatabase, eventType: string, message: string, metadata: Record<string, unknown> = {}, subjectRef: string | null = null): void {
+  db.insertAudit({
+    createdAt: new Date().toISOString(),
+    eventType,
+    id: randomId(),
+    message,
+    metadata: JSON.stringify(metadata),
+    subjectRef,
+    subjectType: "vault",
+  });
+}
+
+function recoveryFileContent(vaultPath: string, token: string): string {
+  const formattedToken = token.toUpperCase().match(/.{1,8}/g)!.join("-");
+  return [
+    "================================================================================",
+    "AUTHO VAULT RECOVERY FILE",
+    "================================================================================",
+    `Generated : ${new Date().toISOString()}`,
+    `Vault     : ${vaultPath}`,
+    "",
+    "WARNING: Anyone with this file can open your vault regardless of password,",
+    "PIN, or authenticator app. Store it offline (printed paper, encrypted USB,",
+    "safety deposit box). Revoke with: autho recovery revoke",
+    "",
+    "RECOVERY TOKEN:",
+    formattedToken,
+    "",
+    "To use: autho unlock --recovery-file <path-to-this-file>",
+    "================================================================================",
+  ].join("\n");
 }
 
 export class VaultSession {
@@ -920,6 +1117,30 @@ export class VaultSession {
       type: normalizeSecretType(row.type),
       updatedAt: row.updatedAt,
     }));
+  }
+
+  /**
+   * Decrypts every secret but returns only display fields (username, url,
+   * description), so list UIs can search without holding values in memory.
+   * Audited once per call instead of once per secret.
+   */
+  listSecretIndex(): SecretIndexEntry[] {
+    const entries = this.db.listSecrets().map((row) => {
+      const secret = this.unwrapSecret(row);
+      const { url, description } = secret.metadata;
+      return {
+        createdAt: secret.createdAt,
+        description: typeof description === "string" && description ? description : null,
+        id: secret.id,
+        name: secret.name,
+        type: secret.type,
+        updatedAt: secret.updatedAt,
+        url: typeof url === "string" && url ? url : null,
+        username: secret.username,
+      };
+    });
+    this.audit("secret.index", "vault", null, "Secret index listed", { count: entries.length });
+    return entries;
   }
 
   getSecret(ref: string): SecretRecord {

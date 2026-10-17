@@ -5,6 +5,7 @@
     "moduleResolution": "Bundler",
     "strict": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "allowJs": false,
     "skipLibCheck": true,
     "resolveJsonModule": true,
@@ -12,7 +13,8 @@
     "jsxImportSource": "@opentui/react",
     "lib": ["ESNext", "DOM"],
     "types": [
-      "bun-types"
+      "bun-types",
+      "node"
     ]
   },
   "include": [

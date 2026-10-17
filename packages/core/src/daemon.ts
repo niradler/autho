@@ -234,7 +234,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
     }
   };
 
-  let server: Bun.Server | null = null;
+  let server: Bun.Server<undefined> | null = null;
 
   const shutdown = (): void => {
     void deleteDaemonState(options.statePath).then(() => {
@@ -379,7 +379,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
 
   await writeDaemonState(options.statePath, {
     pid: process.pid,
-    port: server.port,
+    port: server.port ?? options.port,
     startedAt,
     token,
     vaultPath: options.vaultPath,
@@ -479,7 +479,7 @@ export async function daemonStop(options: DaemonClientOptions): Promise<{ ok: tr
   }
 
   try {
-    const result = await daemonRequest(state, "/shutdown", {});
+    const result = (await daemonRequest(state, "/shutdown", {})) as { ok: true; stopped: true };
     await waitForDaemonStateDeletion(options.statePath);
     return result;
   } catch (error) {

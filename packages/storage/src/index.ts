@@ -17,6 +17,20 @@ export type VaultAuth = {
     kdf: VaultKdfConfig;
     createdAt: string;
   };
+  /** WebAuthn credentials whose PRF output wraps the root key. */
+  passkeys?: VaultPasskey[];
+};
+
+export type VaultPasskey = {
+  id: string;
+  /** base64url credential ID, passed to the browser as allowCredentials. */
+  credentialId: string;
+  label: string;
+  /** base64url PRF input. Not secret: the authenticator's key is what matters. */
+  prfSalt: string;
+  wrappedRootKey: EncryptedBlob;
+  createdAt: string;
+  transports?: string[];
 };
 
 export type SecretRow = {
@@ -76,6 +90,11 @@ export class AuthoDatabase {
     this.db = new Database(vaultPath, { create: true, strict: true });
     this.migrate();
     this.hardenStorageFiles();
+  }
+
+  /** Runs `fn` in one SQLite transaction: all of its writes land, or none do. */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
   }
 
   close(): void {
@@ -239,7 +258,7 @@ export class AuthoDatabase {
 
   updateSecret(id: string, updates: { name?: string; payload?: string; type?: string; updatedAt: string }): void {
     const parts: string[] = [];
-    const values: unknown[] = [];
+    const values: string[] = [];
     let idx = 1;
 
     if (updates.name !== undefined) {

@@ -15,13 +15,18 @@ import { VaultService } from "../../packages/core/src/index.ts";
 
 const repoRoot = join(import.meta.dir, "..", "..");
 const testAuthoHome = mkdtempSync(join(tmpdir(), "autho-home-"));
+// Never inherit AUTHO_* from the developer's shell or an auto-loaded .env:
+// a stray AUTHO_MASTER_PASSWORD silently changes unlock behavior under test.
+const baseEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([key]) => !key.startsWith("AUTHO_")),
+);
 
 function runCli(args: string[], env?: Record<string, string>) {
   const result = Bun.spawnSync({
-    cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
+    cmd: ["bun", "--no-env-file", "run", "./apps/cli/src/index.ts", ...args],
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...baseEnv,
       AUTHO_HOME: testAuthoHome,
       AUTHO_DISABLE_OS_SECRETS: "1",
       ...(env ?? {}),
@@ -39,10 +44,10 @@ function runCli(args: string[], env?: Record<string, string>) {
 
 async function runCliInteractive(args: string[], input: string, env?: Record<string, string>) {
   const processRef = Bun.spawn({
-    cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
+    cmd: ["bun", "--no-env-file", "run", "./apps/cli/src/index.ts", ...args],
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...baseEnv,
       AUTHO_HOME: testAuthoHome,
       AUTHO_DISABLE_OS_SECRETS: "1",
       ...(env ?? {}),
@@ -88,10 +93,10 @@ function cookieHeader(setCookie: string | null): string {
 // Runs CLI without disabling OS secrets (needed for PIN tests)
 function runCliOsSecrets(args: string[], env?: Record<string, string>) {
   const result = Bun.spawnSync({
-    cmd: ["bun", "run", "./apps/cli/src/index.ts", ...args],
+    cmd: ["bun", "--no-env-file", "run", "./apps/cli/src/index.ts", ...args],
     cwd: repoRoot,
     env: {
-      ...process.env,
+      ...baseEnv,
       AUTHO_HOME: testAuthoHome,
       ...(env ?? {}),
     },
@@ -635,7 +640,7 @@ describe("autho rewrite CLI", () => {
     runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "memo", "--type", "note", "--value", "ship the rewrite"]);
 
     const daemon = Bun.spawn({
-      cmd: ["bun", "run", "./apps/daemon/src/index.ts", "serve", "--vault", vaultPath, "--state-file", stateFile, "--port", "0"],
+      cmd: ["bun", "--no-env-file", "run", "./apps/daemon/src/index.ts", "serve", "--vault", vaultPath, "--state-file", stateFile, "--port", "0"],
       cwd: repoRoot,
       stderr: "pipe",
       stdout: "pipe",
@@ -698,7 +703,7 @@ describe("autho rewrite CLI", () => {
     runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "github", "--type", "password", "--value", "ghp_example_secret"]);
 
     const web = Bun.spawn({
-      cmd: ["bun", "run", "./apps/web/src/index.ts", "serve", "--vault", vaultPath, "--port", String(port)],
+      cmd: ["bun", "--no-env-file", "run", "./apps/web/src/index.ts", "serve", "--vault", vaultPath, "--port", String(port)],
       cwd: repoRoot,
       stderr: "pipe",
       stdout: "pipe",
@@ -1209,6 +1214,77 @@ describe("autho config and custom AUTHO_HOME", () => {
     const parsed = JSON.parse(result.stdout) as { config: { editor: string }; configDir: string };
     expect(parsed.config.editor).toBe("code");
     expect(parsed.configDir).toBeTruthy();
+  });
+
+  test("config set validates preferences and config show reports them", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-config-pref-"));
+
+    const set = runCli(["config", "set", "revealSeconds", "60"], { AUTHO_HOME: customHome });
+    expect(set.exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(join(customHome, "config.json"), "utf8")).revealSeconds).toBe(60);
+
+    const bad = runCli(["config", "set", "revealSeconds", "soon"], { AUTHO_HOME: customHome });
+    expect(bad.exitCode).not.toBe(0);
+    expect(JSON.parse(readFileSync(join(customHome, "config.json"), "utf8")).revealSeconds).toBe(60);
+
+    const show = runCliJson(["config", "show"], { AUTHO_HOME: customHome }) as { preferences: Record<string, { value: unknown; source: string }> };
+    expect(show.preferences.revealSeconds).toEqual({ value: 60, source: "config" });
+
+    const env = runCliJson(["config", "show"], { AUTHO_HOME: customHome, AUTHO_TUI_REVEAL_SECONDS: "5" }) as typeof show;
+    expect(env.preferences.revealSeconds?.source).toBe("env");
+
+    expect(runCli(["config", "unset", "revealSeconds"], { AUTHO_HOME: customHome }).exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(join(customHome, "config.json"), "utf8")).revealSeconds).toBeUndefined();
+  });
+
+  test("lease create falls back to the defaultLeaseTtl setting", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-lease-default-"));
+    const vaultPath = join(customHome, "vault.db");
+    const password = "correct horse battery staple";
+    const env = { AUTHO_HOME: customHome };
+    expect(runCli(["init", "--vault", vaultPath, "--password", password], env).exitCode).toBe(0);
+    runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "memo", "--type", "note", "--value", "x"], env);
+
+    const missing = runCli(["lease", "create", "--vault", vaultPath, "--password", password, "--secret", "memo"], env);
+    expect(missing.exitCode).not.toBe(0);
+    expect(missing.stderr).toContain("--ttl");
+
+    expect(runCli(["config", "set", "defaultLeaseTtl", "600"], env).exitCode).toBe(0);
+    const before = Date.now();
+    const lease = runCliJson(["lease", "create", "--vault", vaultPath, "--password", password, "--secret", "memo"], env) as { expiresAt: string };
+    const ttl = (Date.parse(lease.expiresAt) - before) / 1000;
+    expect(ttl).toBeGreaterThan(590);
+    expect(ttl).toBeLessThan(620);
+  });
+
+  test("--version prints the package version", () => {
+    const { version } = JSON.parse(readFileSync(join(repoRoot, "apps/cli/package.json"), "utf8")) as { version: string };
+    expect(runCli(["--version"]).stdout.trim()).toBe(version);
+    expect(runCli(["version"]).stdout.trim()).toBe(version);
+  });
+
+  test("password change re-keys the vault; the old password stops working", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-password-change-"));
+    const vaultPath = join(customHome, "vault.db");
+    const password = "correct horse battery staple";
+    const next = "an entirely new passphrase";
+    const env = { AUTHO_HOME: customHome };
+    expect(runCli(["init", "--vault", vaultPath, "--password", password], env).exitCode).toBe(0);
+    runCliJson(["secrets", "add", "--vault", vaultPath, "--password", password, "--name", "memo", "--type", "note", "--value", "still here"], env);
+
+    const short = runCli(["password", "change", "--vault", vaultPath, "--password", password, "--new-password", "short"], env);
+    expect(short.exitCode).not.toBe(0);
+
+    const changed = runCliJson(["password", "change", "--vault", vaultPath, "--password", password, "--new-password", next], env) as { changed: boolean };
+    expect(changed.changed).toBe(true);
+
+    expect(runCli(["secrets", "list", "--vault", vaultPath, "--password", password], env).exitCode).not.toBe(0);
+    const secret = runCliJson(["secrets", "get", "--vault", vaultPath, "--password", next, "--ref", "memo"], env) as { value: string };
+    expect(secret.value).toBe("still here");
+
+    const unknown = runCli(["password", "rotate", "--vault", vaultPath, "--password", next], env);
+    expect(unknown.exitCode).not.toBe(0);
+    expect(unknown.stderr).toContain("Unknown password action");
   });
 
   test("multiple AUTHO_HOME values isolate vaults completely", () => {
