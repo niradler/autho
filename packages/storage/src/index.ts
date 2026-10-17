@@ -47,10 +47,66 @@ export type LeaseRow = {
   createdAt: string;
   expiresAt: string;
   id: string;
+  /** 1 when the lease also covers secrets linked from its secrets. */
+  includeLinks: number;
   name: string;
   revokedAt: string | null;
   secretRefs: string;
 };
+
+export type LinkRow = {
+  createdAt: string;
+  linkedId: string;
+  primaryId: string;
+};
+
+/** Stored signature of one protected row, kept to tell which rows changed. */
+export type SealRow = {
+  mac: string;
+  rowId: string;
+  /** JSON copy of the row as sealed; null for rows sealed before copies were kept. */
+  snapshot: string | null;
+  tableName: string;
+};
+
+/**
+ * Columns of each table the vault seal covers. Listed explicitly, so adding a
+ * column later doesn't silently change what an existing seal signed.
+ */
+const PROTECTED_COLUMNS = {
+  leases: ["id", "name", "secret_refs", "expires_at", "revoked_at", "created_at", "include_links"],
+  meta: ["key", "value"],
+  secret_links: ["primary_id", "linked_id", "created_at"],
+  secrets: ["id", "name", "type", "payload", "wrapped_key", "created_at", "updated_at"],
+} as const;
+
+type ProtectedTable = keyof typeof PROTECTED_COLUMNS;
+
+function protectedTable(tableName: string): ProtectedTable {
+  if (!Object.hasOwn(PROTECTED_COLUMNS, tableName)) {
+    throw new Error(`Not a sealed table: ${tableName}`);
+  }
+  return tableName as ProtectedTable;
+}
+
+/** WHERE clause and values that select one protected row by its seal row id. */
+function protectedRowWhere(table: ProtectedTable, rowId: string): { sql: string; values: string[] } {
+  if (table === "secret_links") {
+    const [primaryId, linkedId] = rowId.split(">");
+    return { sql: "primary_id = ?1 AND linked_id = ?2", values: [primaryId ?? "", linkedId ?? ""] };
+  }
+  return { sql: `${table === "meta" ? "key" : "id"} = ?1`, values: [rowId] };
+}
+
+/** A row the vault seal covers, as plain column values. */
+export type ProtectedRow = {
+  row: Record<string, unknown>;
+  rowId: string;
+  tableName: string;
+};
+
+/** Meta key holding the vault seal; the seal never covers itself. */
+export const SEAL_META_KEY = "vault.seal";
 
 export type AuditRow = {
   createdAt: string;
@@ -95,6 +151,18 @@ export class AuthoDatabase {
   /** Runs `fn` in one SQLite transaction: all of its writes land, or none do. */
   transaction<T>(fn: () => T): T {
     return this.db.transaction(fn)();
+  }
+
+  /**
+   * Like transaction(), but takes the write lock up front (BEGIN IMMEDIATE),
+   * so a check made at the start still holds when the writes land.
+   */
+  immediateTransaction<T>(fn: () => T): T {
+    return this.db.transaction(fn).immediate();
+  }
+
+  get inTransaction(): boolean {
+    return this.db.inTransaction;
   }
 
   close(): void {
@@ -151,7 +219,31 @@ export class AuthoDatabase {
         metadata TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS secret_links (
+        primary_id TEXT NOT NULL,
+        linked_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (primary_id, linked_id)
+      );
+      CREATE INDEX IF NOT EXISTS secret_links_linked ON secret_links (linked_id);
+
+      CREATE TABLE IF NOT EXISTS seal_rows (
+        table_name TEXT NOT NULL,
+        row_id TEXT NOT NULL,
+        mac TEXT NOT NULL,
+        PRIMARY KEY (table_name, row_id)
+      );
     `);
+
+    const leaseColumns = this.db.query("PRAGMA table_info(leases)").all() as { name: string }[];
+    if (!leaseColumns.some((column) => column.name === "include_links")) {
+      this.db.exec("ALTER TABLE leases ADD COLUMN include_links INTEGER NOT NULL DEFAULT 1");
+    }
+    const sealRowColumns = this.db.query("PRAGMA table_info(seal_rows)").all() as { name: string }[];
+    if (!sealRowColumns.some((column) => column.name === "row_json")) {
+      this.db.exec("ALTER TABLE seal_rows ADD COLUMN row_json TEXT");
+    }
   }
 
   getVaultConfig(): VaultConfig | null {
@@ -284,15 +376,64 @@ export class AuthoDatabase {
     this.db.query(`UPDATE secrets SET ${parts.join(", ")} WHERE id = ?${idx}`).run(...values);
   }
 
+  /** Deletes a secret and every link to or from it. */
   deleteSecret(id: string): void {
+    this.db.query("DELETE FROM secret_links WHERE primary_id = ?1 OR linked_id = ?1").run(id);
     this.db.query("DELETE FROM secrets WHERE id = ?1").run(id);
+  }
+
+  insertLink(link: LinkRow): void {
+    this.db
+      .query("INSERT OR IGNORE INTO secret_links (primary_id, linked_id, created_at) VALUES (?1, ?2, ?3)")
+      .run(link.primaryId, link.linkedId, link.createdAt);
+  }
+
+  /** Returns true when a link was removed. */
+  deleteLink(primaryId: string, linkedId: string): boolean {
+    return (
+      this.db.query("DELETE FROM secret_links WHERE primary_id = ?1 AND linked_id = ?2").run(primaryId, linkedId)
+        .changes > 0
+    );
+  }
+
+  hasLink(primaryId: string, linkedId: string): boolean {
+    return (
+      this.db.query("SELECT 1 FROM secret_links WHERE primary_id = ?1 AND linked_id = ?2").get(primaryId, linkedId) !==
+      null
+    );
+  }
+
+  /** Links where `id` is the primary. */
+  listLinksFrom(id: string): LinkRow[] {
+    return this.db
+      .query(
+        `SELECT primary_id AS primaryId, linked_id AS linkedId, created_at AS createdAt
+         FROM secret_links WHERE primary_id = ?1 ORDER BY created_at ASC`,
+      )
+      .all(id) as LinkRow[];
+  }
+
+  /** Links where `id` is the linked secret. */
+  listLinksTo(id: string): LinkRow[] {
+    return this.db
+      .query(
+        `SELECT primary_id AS primaryId, linked_id AS linkedId, created_at AS createdAt
+         FROM secret_links WHERE linked_id = ?1 ORDER BY created_at ASC`,
+      )
+      .all(id) as LinkRow[];
+  }
+
+  listLinks(): LinkRow[] {
+    return this.db
+      .query("SELECT primary_id AS primaryId, linked_id AS linkedId, created_at AS createdAt FROM secret_links")
+      .all() as LinkRow[];
   }
 
   insertLease(lease: LeaseRow): void {
     this.db
       .query(
-        `INSERT INTO leases (id, name, secret_refs, expires_at, revoked_at, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
+        `INSERT INTO leases (id, name, secret_refs, expires_at, revoked_at, created_at, include_links)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
       )
       .run(
         lease.id,
@@ -301,6 +442,7 @@ export class AuthoDatabase {
         lease.expiresAt,
         lease.revokedAt,
         lease.createdAt,
+        lease.includeLinks,
       );
   }
 
@@ -313,7 +455,8 @@ export class AuthoDatabase {
            secret_refs AS secretRefs,
            expires_at AS expiresAt,
            revoked_at AS revokedAt,
-           created_at AS createdAt
+           created_at AS createdAt,
+           include_links AS includeLinks
          FROM leases
          WHERE id = ?1
          LIMIT 1`,
@@ -327,6 +470,72 @@ export class AuthoDatabase {
     this.db
       .query("UPDATE leases SET revoked_at = ?2 WHERE id = ?1")
       .run(id, revokedAt);
+  }
+
+  /** Revokes every lease that is still active. Returns how many were revoked. */
+  revokeActiveLeases(nowIso: string): number {
+    return this.db
+      .query("UPDATE leases SET revoked_at = ?1 WHERE revoked_at IS NULL AND expires_at > ?1")
+      .run(nowIso).changes;
+  }
+
+  /** Every row the vault seal covers, with the columns in PROTECTED_COLUMNS. */
+  listProtectedRows(): ProtectedRow[] {
+    const select = (table: ProtectedTable) => `SELECT ${PROTECTED_COLUMNS[table].join(", ")} FROM ${table}`;
+    const secrets = this.db.query(select("secrets")).all() as Record<string, unknown>[];
+    const links = this.db.query(select("secret_links")).all() as Record<string, unknown>[];
+    const leases = this.db.query(select("leases")).all() as Record<string, unknown>[];
+    const meta = this.db.query(`${select("meta")} WHERE key != ?1`).all(SEAL_META_KEY) as Record<string, unknown>[];
+
+    return [
+      ...secrets.map((row) => ({ row, rowId: String(row.id), tableName: "secrets" })),
+      ...links.map((row) => ({ row, rowId: `${row.primary_id}>${row.linked_id}`, tableName: "secret_links" })),
+      ...leases.map((row) => ({ row, rowId: String(row.id), tableName: "leases" })),
+      ...meta.map((row) => ({ row, rowId: String(row.key), tableName: "meta" })),
+    ];
+  }
+
+  getSeal(): string | null {
+    const row = this.db.query("SELECT value FROM meta WHERE key = ?1").get(SEAL_META_KEY) as { value: string } | null;
+    return row?.value ?? null;
+  }
+
+  /** Stores the seal and the per-row signatures (and row copies) it was computed from. */
+  setSeal(seal: string, rows: SealRow[]): void {
+    this.db.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)").run(SEAL_META_KEY, seal);
+    this.db.exec("DELETE FROM seal_rows");
+    const insert = this.db.query("INSERT INTO seal_rows (table_name, row_id, mac, row_json) VALUES (?1, ?2, ?3, ?4)");
+    for (const row of rows) {
+      insert.run(row.tableName, row.rowId, row.mac, row.snapshot);
+    }
+  }
+
+  listSealRows(): SealRow[] {
+    return this.db
+      .query("SELECT table_name AS tableName, row_id AS rowId, mac, row_json AS snapshot FROM seal_rows")
+      .all() as SealRow[];
+  }
+
+  /** Deletes one sealed row by its seal row id. The seal itself can't be deleted this way. */
+  deleteProtectedRow(tableName: string, rowId: string): void {
+    const table = protectedTable(tableName);
+    if (table === "meta" && rowId === SEAL_META_KEY) {
+      throw new Error("The seal is not a protected row");
+    }
+    const where = protectedRowWhere(table, rowId);
+    this.db.query(`DELETE FROM ${table} WHERE ${where.sql}`).run(...where.values);
+  }
+
+  /** Inserts a sealed row from a copy, using only the table's sealed columns. */
+  insertProtectedRow(tableName: string, row: Record<string, unknown>): void {
+    const table = protectedTable(tableName);
+    const columns = PROTECTED_COLUMNS[table];
+    if (table === "meta" && row.key === SEAL_META_KEY) {
+      throw new Error("The seal is not a protected row");
+    }
+    const placeholders = columns.map((_, index) => `?${index + 1}`).join(", ");
+    const values = columns.map((column) => (row[column] ?? null) as string | number | null);
+    this.db.query(`INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`).run(...values);
   }
 
   insertAudit(event: AuditRow): void {

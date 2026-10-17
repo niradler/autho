@@ -1,9 +1,13 @@
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { resolve } from "node:path";
 
+import type { SealRecord } from "./seal.ts";
+
 const VAULT_PASSWORD_SERVICE = "autho.vault";
 const USER_SECRETS_SERVICE = "autho";
 const PIN_SERVICE = "autho.pin";
+/** Holds the newest vault seal autho has seen, outside the vault file, to catch an older copy of it. */
+const SEAL_SERVICE = "autho.seal";
 
 function vaultPasswordName(vaultPath: string): string {
   return createHash("sha256").update(resolve(vaultPath)).digest("hex");
@@ -71,6 +75,63 @@ export async function deleteVaultPassword(vaultPath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * The seal record for a vault, or null when none is stored, the backend is
+ * unavailable, or OS secrets are disabled (then rollback isn't detected).
+ */
+export async function loadSealRecord(vaultPath: string): Promise<SealRecord | null> {
+  if (osSecretsDisabled()) {
+    return null;
+  }
+
+  try {
+    const raw = await Bun.secrets.get({ name: vaultPasswordName(vaultPath), service: SEAL_SERVICE });
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SealRecord>;
+    if (!Number.isSafeInteger(parsed.counter) || typeof parsed.vaultId !== "string") return null;
+    return { counter: parsed.counter!, vaultId: parsed.vaultId };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Saves `record` unless the stored one is for the same vault and at least as
+ * new: the record only moves forward. A different vault id replaces it (the
+ * vault at this path was re-created).
+ */
+export async function saveSealRecord(vaultPath: string, record: SealRecord | null): Promise<void> {
+  if (!record || osSecretsDisabled()) {
+    return;
+  }
+
+  try {
+    const stored = await loadSealRecord(vaultPath);
+    if (stored && stored.vaultId === record.vaultId && stored.counter >= record.counter) return;
+    await Bun.secrets.set({ name: vaultPasswordName(vaultPath), service: SEAL_SERVICE, value: JSON.stringify(record) });
+  } catch {
+    // best effort: a missing record only means a rollback goes unnoticed
+  }
+}
+
+/**
+ * Closes a vault session and moves the seal record up to the vault's current
+ * seal. Never throws for the record, so it can't mask the command's own error.
+ */
+export async function closeSessionAndRecordSeal(
+  vaultPath: string,
+  session: { close(): void; sealCheckpoint(): SealRecord | null },
+): Promise<void> {
+  let record: SealRecord | null = null;
+  try {
+    record = session.sealCheckpoint();
+  } catch {
+    // best effort
+  }
+  session.close();
+  await saveSealRecord(vaultPath, record);
 }
 
 /**

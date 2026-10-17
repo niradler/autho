@@ -5,12 +5,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { AuthoDatabase } from "../../../packages/storage/src/index.ts";
-import { unlockRootKey } from "../../../packages/crypto/src/index.ts";
-import { VaultSession, defaultVaultPath } from "../../../packages/core/src/index.ts";
+import { VaultService, VaultSession, defaultVaultPath } from "../../../packages/core/src/index.ts";
+import { closeSessionAndRecordSeal, loadSealRecord } from "../../../packages/core/src/os-secrets.ts";
 
 type SessionState = {
   expiresAt: string;
   rootKey: Buffer;
+  /** The root key's wrap says the vault is sealed. */
+  sealBound: boolean;
 };
 
 function parseArgs(argv: string[]): { options: Record<string, string | boolean>; positionals: string[] } {
@@ -75,24 +77,15 @@ function parseCookies(request: Request): Record<string, string> {
   );
 }
 
-function loadRootKey(vaultPath: string, password: string): Buffer {
-  const db = new AuthoDatabase(vaultPath);
-  try {
-    const config = db.getVaultConfig();
-    if (!config) {
-      throw new Error(`Vault is not initialized at ${vaultPath}`);
-    }
-    return unlockRootKey(password, config);
-  } finally {
-    db.close();
-  }
+/** Opens a session per request, with the current keychain seal record so a swapped-in older vault file is caught. */
+async function openSession(vaultPath: string, state: SessionState): Promise<VaultSession> {
+  return new VaultSession(new AuthoDatabase(vaultPath), state.rootKey, {
+    sealBound: state.sealBound,
+    sealRecord: await loadSealRecord(vaultPath),
+  });
 }
 
-function openSession(vaultPath: string, rootKey: Buffer): VaultSession {
-  return new VaultSession(new AuthoDatabase(vaultPath), rootKey);
-}
-
-function requireSession(request: Request, sessions: Map<string, SessionState>): { id: string; rootKey: Buffer } {
+function requireSession(request: Request, sessions: Map<string, SessionState>): SessionState & { id: string } {
   const cookies = parseCookies(request);
   const sessionId = cookies.autho_session;
   if (!sessionId) {
@@ -106,7 +99,7 @@ function requireSession(request: Request, sessions: Map<string, SessionState>): 
     sessions.delete(sessionId);
     throw new Error("Expired web session");
   }
-  return { id: sessionId, rootKey: session.rootKey };
+  return { ...session, id: sessionId };
 }
 
 async function readJson<T>(request: Request): Promise<T> {
@@ -140,6 +133,7 @@ function page(): string {
       <p>Local-only Bun web UI for vault unlock and secret browsing.</p>
       <form id="unlock-form">
         <input id="password" type="password" placeholder="Master password" required />
+        <input id="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="Authenticator code (if enabled)" />
         <button type="submit">Unlock</button>
       </form>
     </section>
@@ -148,6 +142,15 @@ function page(): string {
       <button id="refresh">Refresh</button>
       <ul id="secret-list"></ul>
       <pre id="output"></pre>
+    </section>
+    <section id="linked" hidden>
+      <h2>Linked to <span id="linked-name"></span></h2>
+      <ul id="linked-list"></ul>
+      <p id="linked-from"></p>
+      <form id="link-form">
+        <input id="link-ref" placeholder="Secret name or id to link" required />
+        <button type="submit">Link</button>
+      </form>
     </section>
   </main>
   <script>
@@ -163,17 +166,77 @@ function page(): string {
       secretList.innerHTML = '';
       data.data.forEach((secret) => {
         const item = document.createElement('li');
-        item.textContent = secret.name + " (" + secret.type + ")";
+        const open = document.createElement('a');
+        open.href = '#';
+        open.textContent = secret.name + " (" + secret.type + ")" + (secret.linkCount ? " · " + secret.linkCount + " linked" : "");
+        open.addEventListener('click', (event) => { event.preventDefault(); showSecret(secret.id); });
+        item.appendChild(open);
         secretList.appendChild(item);
       });
       output.textContent = JSON.stringify(data, null, 2);
     }
+    let current = null;
+    async function showSecret(ref) {
+      const response = await fetch('/api/secrets/' + encodeURIComponent(ref));
+      if (!response.ok) {
+        output.textContent = await response.text();
+        return;
+      }
+      const secret = (await response.json()).data;
+      current = secret;
+      const { links, linkedFrom, ...rest } = secret;
+      output.textContent = JSON.stringify(rest, null, 2);
+      document.getElementById('linked').hidden = false;
+      document.getElementById('linked-name').textContent = secret.name;
+      const list = document.getElementById('linked-list');
+      list.innerHTML = '';
+      if (!links.length) {
+        list.innerHTML = '<li>No linked secrets</li>';
+      }
+      links.forEach((linked) => {
+        const item = document.createElement('li');
+        const open = document.createElement('a');
+        open.href = '#';
+        open.textContent = linked.name + " (" + linked.type + ") ";
+        open.addEventListener('click', (event) => { event.preventDefault(); showSecret(linked.id); });
+        const unlink = document.createElement('button');
+        unlink.textContent = 'Unlink';
+        unlink.addEventListener('click', () => changeLink('DELETE', linked.id));
+        item.append(open, unlink);
+        list.appendChild(item);
+      });
+      document.getElementById('linked-from').textContent = linkedFrom.length
+        ? 'Linked from: ' + linkedFrom.map((primary) => primary.name).join(', ')
+        : '';
+    }
+    async function changeLink(method, secret) {
+      const response = await fetch('/api/links', {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ primary: current.id, secret })
+      });
+      if (!response.ok) {
+        output.textContent = await response.text();
+        return;
+      }
+      await showSecret(current.id);
+      await refresh();
+    }
+    document.getElementById('link-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const input = document.getElementById('link-ref');
+      await changeLink('POST', input.value);
+      input.value = '';
+    });
     document.getElementById('unlock-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const response = await fetch('/api/session/unlock', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password: document.getElementById('password').value })
+        body: JSON.stringify({
+          password: document.getElementById('password').value,
+          totp: document.getElementById('totp').value || undefined
+        })
       });
       output.textContent = await response.text();
       if (response.ok) {
@@ -221,15 +284,19 @@ async function main(): Promise<void> {
         }
 
         if (request.method === "POST" && url.pathname === "/api/session/unlock") {
-          const body = await readJson<{ password: string; ttlSeconds?: number }>(request);
+          const body = await readJson<{ password: string; totp?: string; ttlSeconds?: number }>(request);
           const ttlSeconds = body.ttlSeconds ?? 3600;
           if (ttlSeconds <= 0 || ttlSeconds > 86400) {
             return json({ error: "Session TTL must be between 1 and 86400 seconds" }, 400);
           }
-          const rootKey = loadRootKey(vaultPath, body.password);
+          const { rootKey, sealBound } = VaultService.unlockRootKey(vaultPath, {
+            password: body.password,
+            sealRecord: await loadSealRecord(vaultPath),
+            totp: body.totp,
+          });
           const sessionId = randomBytes(16).toString("hex");
           const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-          sessions.set(sessionId, { expiresAt, rootKey });
+          sessions.set(sessionId, { expiresAt, rootKey, sealBound });
           return json(
             { expiresAt, sessionId },
             200,
@@ -247,7 +314,7 @@ async function main(): Promise<void> {
 
         if (url.pathname.startsWith("/api/")) {
           const webSession = requireSession(request, sessions);
-          const session = openSession(vaultPath, webSession.rootKey);
+          const session = await openSession(vaultPath, webSession);
           try {
             if (request.method === "GET" && url.pathname === "/api/status") {
               return json({
@@ -259,12 +326,22 @@ async function main(): Promise<void> {
             }
 
             if (request.method === "GET" && url.pathname === "/api/secrets") {
-              return json({ data: session.listSecrets() });
+              return json({ data: session.listSecretIndex() });
             }
 
             if (request.method === "GET" && url.pathname.startsWith("/api/secrets/")) {
               const ref = decodeURIComponent(url.pathname.slice("/api/secrets/".length));
-              return json({ data: session.getSecret(ref) });
+              const { linkedFrom, links } = session.getLinks(ref);
+              return json({ data: { ...session.getSecret(ref), linkedFrom, links } });
+            }
+
+            if ((request.method === "POST" || request.method === "DELETE") && url.pathname === "/api/links") {
+              const body = await readJson<{ primary: string; secret: string }>(request);
+              return json({
+                data: request.method === "POST"
+                  ? session.linkSecrets(body.primary, body.secret)
+                  : session.unlinkSecrets(body.primary, body.secret),
+              });
             }
 
             if (request.method === "POST" && url.pathname === "/api/secrets") {
@@ -298,7 +375,7 @@ async function main(): Promise<void> {
 
             if (request.method === "DELETE" && url.pathname.startsWith("/api/secrets/")) {
               const ref = decodeURIComponent(url.pathname.slice("/api/secrets/".length));
-              return json({ data: session.removeSecret(ref) });
+              return json({ data: session.removeSecret(ref, { withLinked: url.searchParams.get("withLinked") === "1" }) });
             }
 
             if (request.method === "GET" && url.pathname.startsWith("/api/otp/")) {
@@ -306,7 +383,7 @@ async function main(): Promise<void> {
               return json({ data: session.generateOtp(ref) });
             }
           } finally {
-            session.close();
+            await closeSessionAndRecordSeal(vaultPath, session);
           }
         }
       } catch (error) {

@@ -89,6 +89,16 @@ test("with two-factor codes on, changing the password keeps the code working", (
   expect(() => VaultService.unlock(vaultPath, { password: PASSWORD, totp: totpCode(secret) })).toThrow();
 });
 
+test("daemon and web unlock (unlockRootKey) require the two-factor code when it is on", () => {
+  const { secret } = VaultService.setupTotp(vaultPath);
+  VaultService.enableTotp(vaultPath, { password: PASSWORD }, secret, totpCode(secret));
+
+  expect(() => VaultService.unlockRootKey(vaultPath, { password: PASSWORD })).toThrow(/TOTP/);
+  expect(() => VaultService.unlockRootKey(vaultPath, { password: PASSWORD, totp: "000000" })).toThrow(/TOTP/);
+  const { rootKey } = VaultService.unlockRootKey(vaultPath, { password: PASSWORD, totp: totpCode(secret) });
+  expect(rootKey.length).toBe(32);
+});
+
 test("one admin handle runs several changes and is unusable after close", () => {
   const admin = VaultService.authorize(vaultPath, { password: PASSWORD });
   const { fileContent } = admin.generateRecovery();

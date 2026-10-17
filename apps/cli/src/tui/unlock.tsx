@@ -4,8 +4,8 @@ import { useKeyboard } from "@opentui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { VaultService } from "../../../../packages/core/src/index.ts";
-import type { UnlockCredentials, VaultSession } from "../../../../packages/core/src/index.ts";
-import { hasPinSet, loadVaultPassword, verifyPin } from "../../../../packages/core/src/os-secrets.ts";
+import type { SealRecord, UnlockCredentials, VaultSession } from "../../../../packages/core/src/index.ts";
+import { hasPinSet, loadSealRecord, loadVaultPassword, verifyPin } from "../../../../packages/core/src/os-secrets.ts";
 import { runPasskeyCeremony, type CeremonyRequest, type CeremonyResult } from "../passkey.ts";
 import { Centered, Chip, SecretInput, useNow, type KeyHint } from "./components.tsx";
 import { useApp, useScreenContext } from "./context.tsx";
@@ -54,11 +54,13 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice, passkeyRun
   const passkeys = useMemo(() => VaultService.listPasskeys(vaultPath), [vaultPath]);
   const passkeyAbort = useRef<AbortController | null>(null);
   const stepBeforePasskey = useRef<Step>("password");
+  // Newest seal seen for this vault (OS keychain), so an older copy of the file is refused.
+  const sealRecord = useRef<SealRecord | null>(null);
 
   const finish = useCallback((creds: UnlockCredentials) => {
     setStep("unlocking");
     try {
-      onUnlock(VaultService.unlock(vaultPath, creds));
+      onUnlock(VaultService.unlock(vaultPath, { ...creds, sealRecord: sealRecord.current }));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setPassword("");
@@ -71,13 +73,14 @@ export function UnlockScreen({ vaultPath, onUnlock, setHints, notice, passkeyRun
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      sealRecord.current = await loadSealRecord(vaultPath);
       const recoveryFile = process.env.AUTHO_RECOVERY_FILE;
       if (recoveryFile) {
         try {
           const token = readRecoveryToken(recoveryFile);
           if (token) {
             try {
-              const session = VaultService.unlock(vaultPath, { password: "", recovery: token });
+              const session = VaultService.unlock(vaultPath, { password: "", recovery: token, sealRecord: sealRecord.current });
               if (!cancelled) onUnlock(session);
               return;
             } catch {

@@ -94,9 +94,10 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
     }
   }, [session, app]);
 
-  const generateOtp = useCallback((entry: SecretIndexEntry): Otp | null => {
+  // `audit: false` for the timer refresh of a code already on screen; showing or copying a code is audited.
+  const generateOtp = useCallback((entry: SecretIndexEntry, options?: { audit?: boolean }): Otp | null => {
     try {
-      const result = session.generateOtp(entry.id);
+      const result = session.generateOtp(entry.id, options);
       const next = { id: entry.id, code: result.code, expiresAt: Date.parse(result.expiresAt) };
       setOtp(next);
       return next;
@@ -109,7 +110,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
   // Keep a shown OTP code current while its secret stays selected.
   useEffect(() => {
     if (otp && selected && otp.id === selected.id && now >= otp.expiresAt) {
-      generateOtp(selected);
+      generateOtp(selected, { audit: false });
     }
   }, [now, otp, selected, generateOtp]);
 
@@ -190,6 +191,9 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, onSe
     selected.type === "otp"
       ? { id: "copy", hotkey: "o", label: "copy code", color: theme.success, run: () => copyPrimary(selected) }
       : { id: "copy", hotkey: "c", label: `copy ${valueName(selected.type).toLowerCase()}`, color: theme.success, run: () => copyPrimary(selected) },
+    ...(selected.type !== "otp"
+      ? [{ id: "reveal", hotkey: "s", label: revealed?.id === selected.id ? "hide" : "reveal", color: theme.revealed, run: () => toggleReveal(selected) }]
+      : []),
     ...(selected.url && selected.type !== "otp" ? [{ id: "open", hotkey: "o", label: "open", color: theme.info, run: () => open(selected) }] : []),
     { id: "edit", hotkey: "e", label: "edit", color: theme.accent, run: () => onEdit(selected.id) },
     { id: "delete", hotkey: "d", label: "delete", color: theme.danger, run: () => setConfirmDelete(true) },

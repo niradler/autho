@@ -107,8 +107,21 @@ export function decryptWithKey(
   ]);
 }
 
+const ROOT_AAD = "autho:vault-root";
+/**
+ * AAD for a root key wrapped by a vault that carries an integrity seal. It
+ * records "this vault is sealed" where only the password holder can change
+ * it, so deleting the seal can't pass for a vault that predates sealing.
+ */
+const SEALED_ROOT_AAD = "autho:vault-root:sealed";
+
+/** Wraps a root key under an already-derived password key. */
+export function wrapRootKey(rootKey: Buffer, passwordKey: Buffer, sealed: boolean): EncryptedBlob {
+  return encryptWithKey(rootKey, passwordKey, sealed ? SEALED_ROOT_AAD : ROOT_AAD);
+}
+
 /** Wraps a new (or, for a password change, the existing) root key under `password`. */
-export function createVaultConfig(password: string, rootKey: Buffer = randomBytes(32)): {
+export function createVaultConfig(password: string, rootKey: Buffer = randomBytes(32), options?: { sealed?: boolean }): {
   config: VaultConfig;
   rootKey: Buffer;
 } {
@@ -123,16 +136,23 @@ export function createVaultConfig(password: string, rootKey: Buffer = randomByte
       createdAt: new Date().toISOString(),
       kdf,
       version: 1,
-      wrappedRootKey: encryptWithKey(rootKey, key, "autho:vault-root"),
+      wrappedRootKey: wrapRootKey(rootKey, key, options?.sealed ?? false),
     },
     rootKey,
   };
 }
 
-export function unlockRootKey(password: string, config: VaultConfig): Buffer {
-  const key = deriveKeyFromPassword(password, config.kdf);
+/** Unwraps the root key with an already-derived password key, and reports which wrap it was. */
+export function unwrapRootKey(config: VaultConfig, passwordKey: Buffer): { rootKey: Buffer; sealed: boolean } {
+  try {
+    return { rootKey: decryptWithKey(config.wrappedRootKey, passwordKey, SEALED_ROOT_AAD), sealed: true };
+  } catch {
+    return { rootKey: decryptWithKey(config.wrappedRootKey, passwordKey, ROOT_AAD), sealed: false };
+  }
+}
 
-  return decryptWithKey(config.wrappedRootKey, key, "autho:vault-root");
+export function unlockRootKey(password: string, config: VaultConfig): Buffer {
+  return unwrapRootKey(config, deriveKeyFromPassword(password, config.kdf)).rootKey;
 }
 
 // ---------------------------------------------------------------------------

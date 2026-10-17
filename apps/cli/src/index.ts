@@ -21,6 +21,7 @@ import {
 } from "../../../packages/core/src/daemon.ts";
 import {
   VaultService,
+  type SealChange,
   type UnlockCredentials,
   type AuthoConfig,
   PREFERENCES,
@@ -44,7 +45,10 @@ import {
   deleteVaultPassword,
   getOsSecret,
   hasPinSet,
+  closeSessionAndRecordSeal,
+  loadSealRecord,
   loadVaultPassword,
+  saveSealRecord,
   osSecretsDisabled,
   setOsSecret,
   storePinHash,
@@ -73,6 +77,7 @@ enum Scope {
   Import = "import",
   Init = "init",
   Lease = "lease",
+  Link = "link",
   OsSecrets = "os-secrets",
   Otp = "otp",
   Passkey = "passkey",
@@ -82,7 +87,9 @@ enum Scope {
   Recovery = "recovery",
   Secrets = "secrets",
   Status = "status",
+  Unlink = "unlink",
   Unlock = "unlock",
+  Vault = "vault",
   Version = "version",
   Web = "web",
 }
@@ -110,6 +117,7 @@ enum Action {
   Path = "path",
   Read = "read",
   Remove = "remove",
+  Reseal = "reseal",
   Render = "render",
   Revoke = "revoke",
   Rm = "rm",
@@ -121,6 +129,7 @@ enum Action {
   Sync = "sync",
   Unlock = "unlock",
   Unset = "unset",
+  Verify = "verify",
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -223,6 +232,15 @@ function output(value: unknown, jsonMode = false): void {
   console.log(value);
 }
 
+function printSealChanges(changes: SealChange[], diffTrusted: boolean): void {
+  if (!diffTrusted && changes.length > 0) {
+    console.log("The stored row signatures were edited too, so the list below may be incomplete.");
+  }
+  for (const change of changes) {
+    console.log(`  ${change.change.padEnd(8)} ${change.table} ${change.rowId}`);
+  }
+}
+
 function absolutePath(path: string): string {
   return resolve(path);
 }
@@ -296,7 +314,7 @@ async function runPromptMode(vaultPath: string, initialPassword?: string): Promi
 
   try {
     const password = await askPassword(prompt, initialPassword);
-    const session = VaultService.unlock(vaultPath, password);
+    const session = VaultService.unlock(vaultPath, { password, sealRecord: await loadSealRecord(vaultPath) });
     try {
       const action = (await prompt.ask("Action [create/read/list/delete/otp/exit]: ")).toLowerCase();
 
@@ -358,7 +376,7 @@ async function runPromptMode(vaultPath: string, initialPassword?: string): Promi
 
       throw new Error(`Unknown prompt action: ${action}`);
     } finally {
-      session.close();
+      await closeSessionAndRecordSeal(vaultPath, session);
     }
   } finally {
     prompt.close();
@@ -393,10 +411,12 @@ async function resolveUnlockCredentials(
   args: ParsedArgs,
   existingPassword?: string,
 ): Promise<UnlockCredentials> {
+  const sealRecord = await loadSealRecord(vaultPath);
+
   // A passkey replaces password, PIN and TOTP: the authenticator already
   // required user verification (biometric or PIN) to release its PRF value.
   if (wantsPasskey(args)) {
-    return passkeyCredentials(vaultPath);
+    return { ...(await passkeyCredentials(vaultPath)), sealRecord };
   }
 
   // Password: --password > AUTHO_MASTER_PASSWORD > OS keychain > interactive prompt
@@ -408,7 +428,7 @@ async function resolveUnlockCredentials(
     password = await readPasswordMasked("Master password: ");
   }
 
-  const creds: UnlockCredentials = { password: required(password, "--password") };
+  const creds: UnlockCredentials = { password: required(password, "--password"), sealRecord };
 
   // PIN check (if set on this machine)
   // Resolution order: AUTHO_PIN env var > --pin flag > interactive prompt
@@ -604,12 +624,17 @@ function help(): string {
     "  import legacy --file <path> [--skip-existing] [--vault <path>] [--json]",
     "  secrets add --name <name> --type <password|note|otp> --value <value> [--username <v>] [--url <v>] [--description <v>] [--digits <v>] [--algorithm <v>] [--vault <path>]",
     "  secrets list [--vault <path>] [--json]",
-    "  secrets get --ref <name-or-id> [--vault <path>] [--json]",
-    "  secrets rm --ref <name-or-id> [--vault <path>] [--json]",
+    "  secrets get --ref <name-or-id> [--links] [--vault <path>] [--json]",
+    "  secrets rm --ref <name-or-id> [--with-linked] [--vault <path>] [--json]",
+    "  link <primary> <secret> [--vault <path>] [--json]      Show <secret> on <primary>'s page",
+    "  unlink <primary> <secret> [--vault <path>] [--json]",
     "  secrets edit --ref <name-or-id> [--new-name <v>] [--value <v>] [--username <v>] [--url <v>] [--description <v>] [--vault <path>] [--json]",
     "  otp code --ref <name-or-id> [--vault <path>] [--json]",
-    "  lease create --secret <ref> [--secret <ref>] [--ttl <seconds>] [--name <v>] [--vault <path>] [--json]",
+    "  lease create --secret <ref> [--secret <ref>] [--ttl <seconds>] [--name <v>] [--no-links] [--vault <path>] [--json]",
+    "  lease show --lease <id> [--vault <path>] [--json]",
     "  lease revoke --lease <id> [--vault <path>] [--json]",
+    "  vault verify [--vault <path>] [--json]",
+    "  vault reseal [--accept] [--vault <path>] [--json]",
     "  env render --map <ENV=ref> [--project-file <path>] [--lease <id>] [--vault <path>] [--json]",
     "  env sync --map <ENV=ref> [--project-file <path>] [--lease <id>] [--ttl <seconds>] [--output <path>] [--force] [--vault <path>] [--json]",
     "  exec --map <ENV=ref> [--project-file <path>] [--lease <id>] [--vault <path>] -- <cmd>",
@@ -660,6 +685,9 @@ function help(): string {
     "  Config keys: vaultDir, revealSeconds, clipboardClearSeconds, idleLockSeconds, passwordLength,",
     "    passwordSymbols, mouse, defaultLeaseTtl, daemonTtlSeconds, webPort (see `autho config show`).",
     "  lease create uses the defaultLeaseTtl setting when --ttl is omitted (0 = --ttl required).",
+    "  A lease on a secret also covers the secrets linked to it, read live (--no-links to opt out).",
+    "  env and exec inject an OTP secret's current code, never its seed.",
+    "  The vault is sealed: edits made outside autho stop env, exec and leases until `autho vault reseal`.",
     "  In the TUI, press , for Settings. `autho --version` prints the installed version.",
     "  The default vault path is ~/.autho/vault.db (override with config or AUTHO_HOME).",
     "  The default project file is <vaultDir>/project.json.",
@@ -726,6 +754,7 @@ async function main(): Promise<void> {
     const needsPassword = ([
       Scope.Secrets, Scope.Otp, Scope.Lease, Scope.Env, Scope.Exec,
       Scope.File, Scope.Files, Scope.Audit, Scope.Import, Scope.Recovery, Scope.Unlock,
+      Scope.Link, Scope.Unlink, Scope.Vault,
     ] as string[]).includes(scope ?? "");
     const daemonNeedsPassword = scope === Scope.Daemon && action === Action.Unlock;
     if (needsPassword || daemonNeedsPassword) {
@@ -929,10 +958,14 @@ async function main(): Promise<void> {
   }
 
   if (scope === Scope.Daemon && action === Action.Unlock) {
+    // Same checks as any unlock (PIN, TOTP); the daemon itself needs the password.
+    const creds = await resolveUnlockCredentials(vaultPath, args, password);
+    if (creds.passkey || creds.recovery) throw new Error("daemon unlock needs the master password");
     output(
       await daemonUnlock({
-        password: required(password, "--password"),
+        password: creds.password,
         statePath,
+        totp: creds.totp,
         ttlSeconds: getString(args, "ttl") ? Number(getString(args, "ttl")) : numberPreference("daemonTtlSeconds"),
       }),
       jsonMode,
@@ -1039,6 +1072,7 @@ async function main(): Promise<void> {
       info = admin.addPasskey({ ...result, label, prfSalt });
     } finally {
       admin.close();
+      await saveSealRecord(vaultPath, admin.sealRecord());
     }
     if (jsonMode) {
       output({ added: true, id: info.id, label: info.label }, true);
@@ -1058,6 +1092,30 @@ async function main(): Promise<void> {
 
   if (scope === Scope.Passkey) {
     throw new Error(`Unknown passkey action: ${action}. Use add, list or remove.`);
+  }
+
+  if (scope === Scope.Vault && action === Action.Reseal) {
+    const mode = getBoolean(args, "accept") ? "accept" : "quarantine";
+    const result = VaultService.reseal(vaultPath, await resolveUnlockCredentials(vaultPath, args, password), mode);
+    await saveSealRecord(vaultPath, result.sealRecord);
+    if (jsonMode) {
+      output(result, true);
+    } else if (result.wasIntact) {
+      console.log("The vault seal is intact; nothing to do.");
+    } else {
+      if (result.reason) console.log(`Seal problem: ${result.reason}.`);
+      printSealChanges(result.changes, result.diffTrusted);
+      if (mode === "quarantine") {
+        console.log(`Revoked ${result.revokedLeases} active lease(s).`);
+        if (result.undone.length) console.log(`Undid ${result.undone.length} change(s).`);
+        if (result.kept.length) {
+          console.log(`Couldn't undo ${result.kept.length} change(s); check these by hand:`);
+          printSealChanges(result.kept, true);
+        }
+      }
+      console.log(mode === "accept" ? "Vault re-sealed as it is now." : "Vault re-sealed.");
+    }
+    return;
   }
 
   if (scope === Scope.Password && action === Action.Change) {
@@ -1082,6 +1140,7 @@ async function main(): Promise<void> {
       }
     } finally {
       admin.close();
+      await saveSealRecord(vaultPath, admin.sealRecord());
     }
     return;
   }
@@ -1140,14 +1199,45 @@ async function main(): Promise<void> {
     }
 
     if (scope === Scope.Secrets && action === Action.Get) {
-      const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
-      output(session.getSecret(required(ref, "--ref")), jsonMode);
+      const ref = required(getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id"), "--ref");
+      const secret = session.getSecret(ref);
+      output(getBoolean(args, "links") ? { ...secret, ...session.getLinks(secret.id) } : secret, jsonMode);
       return;
     }
 
     if (scope === Scope.Secrets && action === Action.Rm) {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
-      output(session.removeSecret(required(ref, "--ref")), jsonMode);
+      output(session.removeSecret(required(ref, "--ref"), { withLinked: getBoolean(args, "with-linked") }), jsonMode);
+      return;
+    }
+
+    if (scope === Scope.Link || scope === Scope.Unlink) {
+      // autho link <primary> <secret>, or --primary/--secret
+      const primary = required(action ?? getString(args, "primary"), "<primary>");
+      const linked = required(subaction ?? getString(args, "secret"), "<secret>");
+      output(scope === Scope.Link ? session.linkSecrets(primary, linked) : session.unlinkSecrets(primary, linked), jsonMode);
+      return;
+    }
+
+    if (scope === Scope.Vault && action === Action.Verify) {
+      const seal = session.verifySeal();
+      if (jsonMode) {
+        output(seal, true);
+      } else if (seal.state === "intact") {
+        console.log("Vault seal is intact.");
+      } else if (seal.state === "unsealed") {
+        console.log("Vault isn't sealed yet. Unlock it with the master password to seal it.");
+      } else {
+        console.log(`Vault was modified outside autho: ${seal.reason}.`);
+        printSealChanges(seal.changes, seal.diffTrusted);
+        console.log("Run `autho vault reseal` to undo the changes and revoke leases, or `autho vault reseal --accept` if you made the change.");
+      }
+      if (seal.state === "tampered") process.exitCode = 2;
+      return;
+    }
+
+    if (scope === Scope.Lease && action === Action.Show) {
+      output(session.showLease(required(getString(args, "lease"), "--lease")), jsonMode);
       return;
     }
 
@@ -1174,6 +1264,7 @@ async function main(): Promise<void> {
       output(
         session.createLease({
           name: getString(args, "name") ?? "session",
+          noLinks: getBoolean(args, "no-links"),
           secretRefs: getStrings(args, "secret"),
           ttlSeconds: leaseTtl(args),
         }),
@@ -1287,7 +1378,7 @@ async function main(): Promise<void> {
 
     throw new Error(`Unknown command: ${[scope, action, subaction].filter(Boolean).join(" ")}`);
   } finally {
-    session.close();
+    await closeSessionAndRecordSeal(vaultPath, session);
   }
 }
 

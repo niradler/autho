@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { deletePin, storePinHash } from "../../packages/core/src/os-secrets.ts";
 import { VaultService } from "../../packages/core/src/index.ts";
@@ -760,6 +761,22 @@ describe("autho rewrite CLI", () => {
       const secret = (await getResponse.json()) as { data: { value: string } };
       expect(secret.data.value).toBe("web note");
 
+      const changeLink = (method: string) =>
+        fetch(`http://127.0.0.1:${port}/api/links`, {
+          body: JSON.stringify({ primary: "github", secret: "memo" }),
+          headers: { "content-type": "application/json", cookie },
+          method,
+        });
+      expect((await changeLink("POST")).status).toBe(200);
+      const linkedResponse = await fetch(`http://127.0.0.1:${port}/api/secrets/github`, { headers: { cookie } });
+      const linked = (await linkedResponse.json()) as { data: { links: Array<{ name: string }> } };
+      expect(linked.data.links.map((s) => s.name)).toEqual(["memo"]);
+      const indexed = (await (await fetch(`http://127.0.0.1:${port}/api/secrets`, { headers: { cookie } })).json()) as {
+        data: Array<{ linkCount: number; name: string }>;
+      };
+      expect(indexed.data.find((s) => s.name === "github")!.linkCount).toBe(1);
+      expect((await changeLink("DELETE")).status).toBe(200);
+
       const deleteResponse = await fetch(`http://127.0.0.1:${port}/api/secrets/memo`, {
         headers: { cookie },
         method: "DELETE",
@@ -1313,5 +1330,50 @@ describe("autho config and custom AUTHO_HOME", () => {
     expect(secretsA.some((s) => s.name === "secret-b")).toBe(false);
     expect(secretsB.some((s) => s.name === "secret-b")).toBe(true);
     expect(secretsB.some((s) => s.name === "secret-a")).toBe(false);
+  });
+
+  test("link, lease coverage, verify and reseal from the CLI", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-linking-"));
+    const vaultPath = join(customHome, "vault.db");
+    const password = "correct horse battery staple";
+    const env = { AUTHO_HOME: customHome };
+    const auth = ["--vault", vaultPath, "--password", password];
+    expect(runCli(["init", ...auth], env).exitCode).toBe(0);
+    runCliJson(["secrets", "add", ...auth, "--name", "github", "--type", "password", "--value", "gh"], env);
+    runCliJson(["secrets", "add", ...auth, "--name", "github-otp", "--type", "otp", "--value", "JBSWY3DPEHPK3PXP"], env);
+    runCliJson(["secrets", "add", ...auth, "--name", "aws", "--type", "password", "--value", "aws"], env);
+
+    expect((runCliJson(["link", "github", "github-otp", ...auth], env) as { created: boolean }).created).toBe(true);
+    const withLinks = runCliJson(["secrets", "get", "--ref", "github", "--links", ...auth], env) as { links: { name: string }[] };
+    expect(withLinks.links.map((s) => s.name)).toEqual(["github-otp"]);
+
+    const lease = runCliJson(["lease", "create", "--secret", "github", "--ttl", "300", ...auth], env) as { id: string };
+    const shown = runCliJson(["lease", "show", "--lease", lease.id, ...auth], env) as { coverage: { name: string }[] };
+    expect(shown.coverage.map((c) => c.name)).toEqual(["github", "github-otp"]);
+
+    expect(runCli(["vault", "verify", ...auth], env).stdout).toContain("intact");
+
+    // Link aws under github by editing the SQLite file directly.
+    const ids = runCliJson(["secrets", "list", ...auth], env) as { id: string; name: string }[];
+    const idOf = (name: string) => ids.find((s) => s.name === name)!.id;
+    const db = new Database(vaultPath);
+    db.query("INSERT INTO secret_links (primary_id, linked_id, created_at) VALUES (?1, ?2, ?3)").run(idOf("github"), idOf("aws"), new Date().toISOString());
+    db.close();
+
+    const verify = runCli(["vault", "verify", ...auth], env);
+    expect(verify.exitCode).toBe(2);
+    expect(verify.stdout).toContain("secret_links");
+    const blocked = runCli(["link", "github", "aws", ...auth], env);
+    expect(blocked.exitCode).not.toBe(0);
+    expect(blocked.stderr).toContain("autho vault reseal");
+
+    const resealed = runCliJson(["vault", "reseal", ...auth], env) as { undone: unknown[]; revokedLeases: number };
+    expect(resealed.undone).toHaveLength(1);
+    expect(resealed.revokedLeases).toBe(1);
+    expect(runCli(["vault", "verify", ...auth], env).exitCode).toBe(0);
+
+    expect(runCliJson(["unlink", "github", "github-otp", ...auth], env)).toBeTruthy();
+    const removed = runCliJson(["secrets", "rm", "--ref", "github", "--with-linked", ...auth], env) as { removedLinked: unknown[] };
+    expect(removed.removedLinked).toEqual([]);
   });
 });

@@ -23,6 +23,8 @@ bun install -g autho
 - Project secret mappings
 - `env render`, `env sync`, and `exec`
 - Short-lived secret leases with audit and revoke
+- Secret linking: keep a login's OTP, recovery codes or keys together under one primary secret
+- Vault seal: edits made to the SQLite file outside autho are detected and block agent access
 - Local daemon unlock flow for repeated agent tasks
 - Local-only Bun web UI for unlock and secret browsing
 - Native OS secret store integration (macOS Keychain, Linux Secret Service, Windows Credential Manager)
@@ -43,12 +45,15 @@ bun install -g autho
 - Passkeys and security keys wrap the root key with a key derived (HKDF-SHA256) from the authenticator's PRF output; the PRF value is never stored, and user verification (biometric or PIN) is required
 - Copied secrets are cleared from the clipboard after 30 seconds, only if the clipboard still holds them — also after the TUI exits
 - Audit events record access patterns without storing secret values
+- The vault is **sealed**: an HMAC (keyed from the root key) covers secrets, links, leases and settings. Any change made without the key stops `env`, `exec` and lease reads until `autho vault reseal`; revoking a lease always works
+- `env` and `exec` inject an OTP secret's current code, never its seed
 - Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
 
 Current at-rest boundary for this release:
 
 - Secret payloads, wrapped keys, and encrypted artifacts are encrypted at rest
-- SQLite metadata such as names, types, timestamps, leases, and audit rows is not fully encrypted at rest
+- SQLite metadata such as names, types, timestamps, leases, and audit rows is not fully encrypted at rest (it is sealed against edits, except audit rows)
+- Swapping in an older copy of the whole vault file is caught using the newest seal autho has seen, kept in the OS keychain; with `AUTHO_DISABLE_OS_SECRETS=1` or no keychain, it goes unnoticed
 - If the OS secret store is unavailable, the daemon token falls back to the local state file
 - Set `AUTHO_DISABLE_OS_SECRETS=1` to opt out of all OS secret store usage
 
@@ -236,6 +241,8 @@ autho secrets list --password "..."
 
 The setup wizard will offer to save your master password to the OS keychain. After that, all commands unlock silently.
 
+A vault from before the vault seal is sealed the first time it is unlocked with the master password, typed or saved in the keychain (passkey and recovery-file unlocks don't seal it). Until then `env`, `exec` and leases refuse to run; `autho vault verify` shows the state.
+
 See [MIGRATION.md](./MIGRATION.md) for full details and legacy import instructions.
 
 ## Testing
@@ -282,6 +289,28 @@ autho lease create --secret github --secret openai --ttl 300 --json
 autho exec --lease <id> --map GITHUB_TOKEN=github --map OPENAI_KEY=openai -- node build.js
 autho lease revoke --lease <id>
 ```
+
+A lease also covers the secrets linked to its secrets, read live: link a new OTP to `github`
+mid-task and the agent can read it right away; unlink it and access stops. Use `--no-links` to
+lease only the named secrets, and `lease show` to see what a lease can read now.
+
+```bash
+autho link github github-otp              # show github-otp on github's page
+autho secrets get --ref github --links
+autho lease show --lease <id>
+autho unlink github github-otp
+autho secrets rm --ref github --with-linked   # also delete linked secrets no other secret links to
+```
+
+If the vault file is edited outside autho, `env`, `exec` and writes stop with an error:
+
+```bash
+autho vault verify            # what changed (exit code 2 when tampered)
+autho vault reseal            # undo the changes, revoke all leases, re-sign
+autho vault reseal --accept   # the change was yours: re-sign as is
+```
+
+`reseal` puts renamed, edited or deleted rows back from the copies the seal signed, and drops rows that were added. If the seal's own list of rows was edited too, it only drops added or changed links and leases and lists the rest for you to check. Copies are kept from the first write after upgrading.
 
 If the OS secret store is unavailable (headless CI, Docker), fall back to the env var:
 

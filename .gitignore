@@ -13,3 +13,4 @@ node_modules
 *.tsbuildinfo
 build/
 .claude/docs/
+packages/cli/.autho

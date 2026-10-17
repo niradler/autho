@@ -2,8 +2,9 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 
 import { AuthoDatabase } from "../../storage/src/index.ts";
-import { randomId, unlockRootKey } from "../../crypto/src/index.ts";
-import { VaultSession, type EnvMapping, type VaultStatus } from "./index.ts";
+import { randomId } from "../../crypto/src/index.ts";
+import { VaultService, VaultSession, type EnvMapping, type VaultStatus } from "./index.ts";
+import { closeSessionAndRecordSeal, loadSealRecord } from "./os-secrets.ts";
 import { defaultDaemonStatePath, writeTextFileSecure } from "./paths.ts";
 
 const DAEMON_TOKEN_SERVICE = "autho.daemon";
@@ -34,6 +35,8 @@ export type DaemonSession = {
   expiresAt: string;
   id: string;
   rootKey: Buffer;
+  /** The root key's wrap says the vault is sealed. */
+  sealBound: boolean;
   vaultPath: string;
 };
 
@@ -165,23 +168,12 @@ export async function deleteDaemonState(statePath: string): Promise<void> {
   }
 }
 
-function openSessionFromRootKey(rootKey: Buffer, vaultPath: string): VaultSession {
-  return new VaultSession(new AuthoDatabase(vaultPath), rootKey);
-}
-
-function unlockVaultRootKey(vaultPath: string, password: string): Buffer {
-  const db = new AuthoDatabase(vaultPath);
-
-  try {
-    const config = db.getVaultConfig();
-    if (!config) {
-      throw new Error(`Vault is not initialized at ${vaultPath}`);
-    }
-
-    return unlockRootKey(password, config);
-  } finally {
-    db.close();
-  }
+/** Opens a session per request, with the current keychain seal record so a swapped-in older vault file is caught. */
+async function openSessionFromRootKey(session: DaemonSession): Promise<VaultSession> {
+  return new VaultSession(new AuthoDatabase(session.vaultPath), session.rootKey, {
+    sealBound: session.sealBound,
+    sealRecord: await loadSealRecord(session.vaultPath),
+  });
 }
 
 async function readJson<T>(request: Request): Promise<T> {
@@ -295,19 +287,24 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
         }
 
         if (request.method === "POST" && url.pathname === "/unlock") {
-          const body = await readJson<{ password: string; ttlSeconds?: number }>(request);
+          const body = await readJson<{ password: string; totp?: string; ttlSeconds?: number }>(request);
           const ttlSeconds = body.ttlSeconds ?? 900;
           if (ttlSeconds <= 0 || ttlSeconds > 86400) {
             return json({ error: "Unlock ttl must be between 1 and 86400 seconds" }, 400);
           }
 
-          const rootKey = unlockVaultRootKey(options.vaultPath, body.password);
+          const { rootKey, sealBound } = VaultService.unlockRootKey(options.vaultPath, {
+            password: body.password,
+            sealRecord: await loadSealRecord(options.vaultPath),
+            totp: body.totp,
+          });
           const sessionId = randomId();
           const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
           sessions.set(sessionId, {
             expiresAt,
             id: sessionId,
             rootKey,
+            sealBound,
             vaultPath: options.vaultPath,
           });
 
@@ -334,11 +331,11 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
             return json({ error: `Unknown daemon session: ${body.sessionId}` }, 404);
           }
 
-          const vaultSession = openSessionFromRootKey(session.rootKey, session.vaultPath);
+          const vaultSession = await openSessionFromRootKey(session);
           try {
             return json(vaultSession.renderEnv(body.mappings, body.leaseId));
           } finally {
-            vaultSession.close();
+            await closeSessionAndRecordSeal(session.vaultPath, vaultSession);
           }
         }
 
@@ -354,11 +351,11 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
             return json({ error: `Unknown daemon session: ${body.sessionId}` }, 404);
           }
 
-          const vaultSession = openSessionFromRootKey(session.rootKey, session.vaultPath);
+          const vaultSession = await openSessionFromRootKey(session);
           try {
             return json(vaultSession.runExec(body));
           } finally {
-            vaultSession.close();
+            await closeSessionAndRecordSeal(session.vaultPath, vaultSession);
           }
         }
 
@@ -437,13 +434,14 @@ export async function daemonStatus(options: DaemonClientOptions): Promise<{
   return daemonRequest(state, "/status", {});
 }
 
-export async function daemonUnlock(options: DaemonClientOptions & { password: string; ttlSeconds?: number }): Promise<{ expiresAt: string; sessionId: string }> {
+export async function daemonUnlock(options: DaemonClientOptions & { password: string; totp?: string; ttlSeconds?: number }): Promise<{ expiresAt: string; sessionId: string }> {
   const state = readDaemonState(options.statePath);
   if (!state) {
     throw new Error(`Daemon state not found: ${options.statePath}`);
   }
   return daemonRequest(state, "/unlock", {
     password: options.password,
+    totp: options.totp,
     ttlSeconds: options.ttlSeconds,
   });
 }

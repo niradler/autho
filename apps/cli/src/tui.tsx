@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { booleanPreference, defaultVaultPath, numberPreference } from "../../../packages/core/src/index.ts";
 import type { SecretRecord, VaultSession } from "../../../packages/core/src/index.ts";
+import { closeSessionAndRecordSeal } from "../../../packages/core/src/os-secrets.ts";
 import { Clipboard } from "./clipboard.ts";
 import { Header, StatusBar, type KeyHint } from "./tui/components.tsx";
 import { AppContext, describeCopy, type AppApi, type Command, type CopyTarget, type Timings, type Toast, type ToastKind } from "./tui/context.tsx";
@@ -76,11 +77,11 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
   const lock = useCallback((notice = "Vault locked") => {
     const current = sessionRef.current;
     if (!current) return;
-    current.close();
+    void closeSessionAndRecordSeal(vaultPath, current);
     setSession(null);
     setPaletteOpen(false);
     setRoute({ name: "unlock", notice });
-  }, []);
+  }, [vaultPath]);
 
   const quit = useCallback(() => {
     if (quitting.current) return;
@@ -280,7 +281,8 @@ export async function runTui(vaultPath?: string): Promise<void> {
   // Runs for quit and for signals alike: hand the clipboard clear to a helper and close the DB.
   renderer.once("destroy", () => {
     clipboard.handOffPendingClear();
-    try { sessionSink.current?.close(); } catch { /* already closed */ }
+    // The session closes synchronously; the keychain write after it is best effort.
+    if (sessionSink.current) void closeSessionAndRecordSeal(vault, sessionSink.current).catch(() => { /* already closed */ });
     sessionSink.current = null;
   });
 
