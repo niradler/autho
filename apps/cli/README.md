@@ -40,6 +40,7 @@ You can also set `AUTHO_MASTER_PASSWORD` to avoid passing `--password` on every 
 ## Features
 
 - **Secret CRUD** — password, note, and OTP types with metadata
+- **Groups** — put secrets in named folders such as `homelab`; filter the CLI, TUI and web UI by group
 - **OTP generation** — RFC 6238 TOTP with configurable algorithm and digits
 - **File encryption** — encrypt/decrypt individual files or entire folders
 - **Env injection** — render secrets as env vars, write `.env` files, or inject into subprocesses
@@ -57,9 +58,11 @@ You can also set `AUTHO_MASTER_PASSWORD` to avoid passing `--password` on every 
 autho init --password <value> [--vault <path>]
 autho status [--password <value>] [--vault <path>] [--json]
 autho secrets add --password <value> --name <name> --type <password|note|otp> --value <value> [options]
-autho secrets list --password <value> [--vault <path>] [--json]
+autho secrets list --password <value> [--group <name>] [--vault <path>] [--json]
+autho secrets edit --password <value> --ref <name-or-id> [--group <name> | --no-group] [options]
 autho secrets get --password <value> --ref <name-or-id> [--vault <path>] [--json]
 autho secrets rm --password <value> --ref <name-or-id> [--vault <path>] [--json]
+autho groups list|create <name>|rename <name> <new-name>|rm <name> [--yes] [--json]
 autho otp code --password <value> --ref <name-or-id> [--vault <path>] [--json]
 autho lease create --password <value> --secret <ref> --ttl <seconds> [--name <value>] [--json]
 autho lease revoke --password <value> --lease <id> [--json]
@@ -86,7 +89,7 @@ autho passkey add|list|remove [--label <name>]
 autho config show|path|set <key> <value>|unset <key>
 ```
 
-Run `autho` with no arguments for the terminal UI; press `5` there for Settings (paths, unlock methods, timeouts, agent defaults).
+Run `autho` with no arguments for the terminal UI; press `2` there for Groups and `6` for Settings (paths, unlock methods, timeouts, agent defaults).
 
 Run `autho help` for the full reference.
 
