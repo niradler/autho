@@ -3,7 +3,7 @@ import { toast } from "sonner";
 
 import { api, errorMessage, setCsrf, type Prefs, type SessionInfo } from "./lib/api.ts";
 
-export type Screen = "vault" | "leases" | "audit" | "health" | "settings";
+export type Screen = "vault" | "groups" | "leases" | "audit" | "health" | "settings";
 
 export type Command = {
   id: string;
@@ -14,6 +14,9 @@ export type Command = {
   run: () => void;
 };
 
+/** The vault list's group scope; a null id is the "(ungrouped)" row. */
+export type GroupFilter = { id: string | null; name: string };
+
 export type KeyHint = [key: string, label: string];
 
 type AppValue = {
@@ -22,6 +25,10 @@ type AppValue = {
   setPrefs: (prefs: Prefs) => void;
   screen: Screen;
   go: (screen: Screen) => void;
+  /** Scopes the vault list to one group (null shows every secret). */
+  vaultGroup: GroupFilter | null;
+  /** Opens the vault scoped to a group, or clears the scope with null. */
+  openGroup: (group: GroupFilter | null) => void;
   lock: (reason?: string) => void;
   /** Copies text; secrets are wiped from the clipboard after the clipboard-clear preference. */
   copy: (label: string, text: string, secret?: boolean) => Promise<void>;
@@ -64,6 +71,7 @@ const ACTIVITY_EVENTS = ["pointerdown", "keydown", "wheel", "touchstart", "point
 export function AppProvider({ session, onLocked, children }: { session: SessionInfo; onLocked: (reason?: string) => void; children: ReactNode }) {
   const [prefs, setPrefs] = useState<Prefs>(session.prefs);
   const [screen, setScreen] = useState<Screen>(() => (location.hash.slice(1) as Screen) || "vault");
+  const [vaultGroup, setVaultGroup] = useState<GroupFilter | null>(null);
   const [screenCommands, setScreenCommands] = useState<Command[]>([]);
   const [hints, setHints] = useState<KeyHint[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -77,6 +85,11 @@ export function AppProvider({ session, onLocked, children }: { session: SessionI
     setScreen(next);
     history.replaceState(null, "", `#${next}`);
   }, []);
+
+  const openGroup = useCallback((group: GroupFilter | null) => {
+    setVaultGroup(group);
+    go("vault");
+  }, [go]);
 
   const lock = useCallback((reason?: string) => {
     if (locking.current) return;
@@ -144,9 +157,9 @@ export function AppProvider({ session, onLocked, children }: { session: SessionI
   }, []);
 
   const value = useMemo<AppValue>(() => ({
-    session, prefs, setPrefs, screen, go, lock, copy,
+    session, prefs, setPrefs, screen, go, vaultGroup, openGroup, lock, copy,
     setScreenCommands, screenCommands, setHints, hints, paletteOpen, setPaletteOpen, modalOpen, setModalOpen,
-  }), [session, prefs, screen, go, lock, copy, screenCommands, hints, paletteOpen, modalOpen]);
+  }), [session, prefs, screen, go, vaultGroup, openGroup, lock, copy, screenCommands, hints, paletteOpen, modalOpen]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

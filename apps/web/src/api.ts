@@ -7,6 +7,7 @@ import {
   AUDIT_SOURCES,
   MIN_PASSWORD_LENGTH,
   PREFERENCES,
+  UNGROUPED_LABEL,
   VaultService,
   VaultSession,
   authoHomeDir,
@@ -73,6 +74,16 @@ function str(body: Body, key: string, max: number): string {
 
 function optStr(body: Body, key: string, max: number): string | undefined {
   return body[key] === undefined || body[key] === null ? undefined : str(body, key, max);
+}
+
+/** A secret's group: missing keeps it, null or "" ungroups, a string names an existing group (id or name). */
+function groupField(body: Body): string | null | undefined {
+  const value = body.group;
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  if (typeof value !== "string") throw new HttpError(400, "group must be a string or null");
+  if (value.length > LIMITS.name) throw new HttpError(400, "group is too long");
+  return value;
 }
 
 function secretType(body: Body): string {
@@ -295,13 +306,22 @@ route("GET", "/api/session", true, (ctx, { session }) => ({ data: sessionInfo(ct
 
 // Secrets
 
-route("GET", "/api/secrets", true, (ctx, { session }) => withVault(ctx, session!, (vault) => ({ data: vault.listSecretIndex() })));
+route("GET", "/api/secrets", true, (ctx, { query, session }) =>
+  withVault(ctx, session!, (vault) => {
+    const entries = vault.listSecretIndex();
+    const group = query.get("group");
+    if (group === null) return { data: entries };
+    // "(ungrouped)" or an empty value lists the secrets in no group.
+    const groupId = group === "" || group === UNGROUPED_LABEL ? null : vault.getGroup(group).id;
+    return { data: entries.filter((entry) => entry.groupId === groupId) };
+  }));
 
 route("POST", "/api/secrets", true, (ctx, { body, session }) =>
   withVault(ctx, session!, (vault) => {
     const type = secretType(body);
     const username = type === "note" ? undefined : optStr(body, "username", LIMITS.short)?.trim() || undefined;
     const created = vault.addSecret({
+      group: groupField(body) ?? undefined,
       metadata: metadataFrom(body, type),
       name: str(body, "name", LIMITS.name).trim(),
       type,
@@ -324,6 +344,7 @@ route("PATCH", "/api/secrets/:ref", true, (ctx, { body, params, session }) =>
     if ("url" in body || type !== "password") metadata.url = parsed.url;
     if ("description" in body) metadata.description = parsed.description;
     const updated = vault.updateSecret(existing.id, {
+      group: groupField(body),
       metadata,
       name: optStr(body, "name", LIMITS.name)?.trim() || undefined,
       type,
@@ -353,6 +374,19 @@ route("POST", "/api/links", true, (ctx, { body, session }) =>
 
 route("DELETE", "/api/links", true, (ctx, { body, session }) =>
   withVault(ctx, session!, (vault) => ({ data: vault.unlinkSecrets(str(body, "primary", LIMITS.name), str(body, "secret", LIMITS.name)) })));
+
+// Groups
+
+route("GET", "/api/groups", true, (ctx, { session }) => withVault(ctx, session!, (vault) => ({ data: vault.listGroups() })));
+
+route("POST", "/api/groups", true, (ctx, { body, session }) =>
+  withVault(ctx, session!, (vault) => ({ data: vault.createGroup(str(body, "name", LIMITS.name)), status: 201 })));
+
+route("PATCH", "/api/groups/:id", true, (ctx, { body, params, session }) =>
+  withVault(ctx, session!, (vault) => ({ data: vault.renameGroup(params.id!, str(body, "name", LIMITS.name)) })));
+
+route("DELETE", "/api/groups/:id", true, (ctx, { params, session }) =>
+  withVault(ctx, session!, (vault) => ({ data: vault.removeGroup(params.id!) })));
 
 // Leases
 

@@ -7,7 +7,7 @@ import { DialogContent, DialogFooter } from "../components/ui/dialog.tsx";
 import { Field, Input, Textarea } from "../components/ui/field.tsx";
 import { Kbd, Spinner } from "../components/ui/panel.tsx";
 import { useApp } from "../context.tsx";
-import { api, errorMessage, type SecretDetail, type SecretEntry, type SecretType } from "../lib/api.ts";
+import { api, errorMessage, type Group, type SecretDetail, type SecretEntry, type SecretType } from "../lib/api.ts";
 import { TYPE_META, cn, generatePassword, isMac } from "../lib/utils.ts";
 
 const TYPES: SecretType[] = ["password", "note", "otp"];
@@ -20,9 +20,11 @@ function valueLabel(type: SecretType): string {
  * Create and edit share one form, like the TUI. When editing, the stored
  * value is only loaded on request (ctrl+r); leaving it empty keeps it.
  */
-export function SecretForm({ secret, existingNames, onDone }: {
+export function SecretForm({ secret, existingNames, defaultGroupId = null, onDone }: {
   secret: SecretDetail | null;
   existingNames: string[];
+  /** A new secret starts in this group (the vault's current group scope). */
+  defaultGroupId?: string | null;
   onDone: (saved: SecretEntry) => void;
 }) {
   const { prefs } = useApp();
@@ -33,6 +35,8 @@ export function SecretForm({ secret, existingNames, onDone }: {
   const [username, setUsername] = useState(secret?.username ?? "");
   const [url, setUrl] = useState(secret?.url ?? "");
   const [description, setDescription] = useState(secret?.description ?? "");
+  const [groups, setGroups] = useState<Group[] | null>(null);
+  const [groupId, setGroupId] = useState<string | null>(secret ? secret.groupId : defaultGroupId);
   const [showValue, setShowValue] = useState(false);
   const [error, setError] = useState<{ field?: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -49,6 +53,11 @@ export function SecretForm({ secret, existingNames, onDone }: {
       loaded.current = null;
     }
   };
+
+  // Groups are picked here, never created: that happens on the Groups screen.
+  useEffect(() => {
+    api.groups().then(setGroups).catch((e) => setError({ message: errorMessage(e) }));
+  }, []);
 
   // A shown value hides after the reveal preference, like everywhere else.
   useEffect(() => {
@@ -97,6 +106,7 @@ export function SecretForm({ secret, existingNames, onDone }: {
         if (type !== "note" && username.trim() !== (secret.username ?? "")) updates.username = username.trim();
         if (type === "password" && url.trim() !== (secret.url ?? "")) updates.url = url.trim();
         if (description.trim() !== (secret.description ?? "")) updates.description = description.trim();
+        if (groupId !== secret.groupId) updates.group = groupId;
         if (Object.keys(updates).length === 0) {
           toast("No changes");
           return onDone(secret);
@@ -112,6 +122,7 @@ export function SecretForm({ secret, existingNames, onDone }: {
           username: type === "note" ? undefined : username.trim() || undefined,
           url: type === "password" ? url.trim() || undefined : undefined,
           description: description.trim() || undefined,
+          group: groupId ?? undefined,
         });
         toast.success(`Created "${trimmed}"`);
         onDone(saved);
@@ -191,6 +202,23 @@ export function SecretForm({ secret, existingNames, onDone }: {
 
         <Field label="Name" htmlFor="secret-name" error={fieldError("name")}>
           <Input id="secret-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. github" maxLength={200} aria-invalid={Boolean(fieldError("name")) || undefined} />
+        </Field>
+
+        <Field
+          label="Group"
+          htmlFor="secret-group"
+          hint={groups && groups.length === 0 ? "Create groups on the Groups screen" : undefined}
+        >
+          <select
+            id="secret-group"
+            value={groupId ?? ""}
+            onChange={(e) => setGroupId(e.target.value || null)}
+            disabled={!groups || groups.length === 0}
+            className="h-9 w-full cursor-pointer rounded-md border border-border bg-input px-2.5 text-sm text-text transition-colors focus:border-accent focus:bg-input-focus focus:outline-none disabled:cursor-default disabled:opacity-50"
+          >
+            <option value="">(none)</option>
+            {(groups ?? []).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          </select>
         </Field>
 
         <Field

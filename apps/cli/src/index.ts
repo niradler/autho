@@ -25,6 +25,7 @@ import {
   type SealChange,
   type UnlockCredentials,
   type AuthoConfig,
+  type VaultSession,
   PREFERENCES,
   authoConfigDir,
   configFilePath,
@@ -75,6 +76,7 @@ enum Scope {
   Exec = "exec",
   File = "file",
   Files = "files",
+  Groups = "groups",
   Help = "help",
   HelpFlag = "--help",
   Import = "import",
@@ -120,6 +122,7 @@ enum Action {
   Path = "path",
   Read = "read",
   Remove = "remove",
+  Rename = "rename",
   Reseal = "reseal",
   Render = "render",
   Revoke = "revoke",
@@ -233,6 +236,41 @@ function output(value: unknown, jsonMode = false): void {
   }
 
   console.log(value);
+}
+
+/** `autho groups list|create|rename|rm`. Names can be positional or passed as --name / --new-name. */
+async function runGroupsCommand(session: VaultSession, args: ParsedArgs, action: string | undefined, jsonMode: boolean): Promise<void> {
+  const [, , first, second] = args.positionals;
+  const name = () => required(first ?? getString(args, "name"), "<name>");
+
+  if (action === undefined || action === Action.List) {
+    output(session.listGroups(), jsonMode);
+    return;
+  }
+  if (action === Action.Create) {
+    output(session.createGroup(name()), jsonMode);
+    return;
+  }
+  if (action === Action.Rename) {
+    output(session.renameGroup(name(), required(second ?? getString(args, "new-name"), "<new-name>")), jsonMode);
+    return;
+  }
+  if (action === Action.Rm || action === Action.Remove || action === Action.Delete) {
+    const group = session.getGroup(name());
+    if (!getBoolean(args, "yes")) {
+      const question = `Delete group "${group.name}"? ${group.secretCount} secret${group.secretCount === 1 ? "" : "s"} will become ungrouped (none are deleted).`;
+      if (!process.stdin.isTTY) {
+        throw new Error(`${question} Pass --yes to confirm.`);
+      }
+      if (!(await confirm(question, false))) {
+        console.log("Cancelled.");
+        return;
+      }
+    }
+    output(session.removeGroup(group.id), jsonMode);
+    return;
+  }
+  throw new Error(`Unknown groups action: ${action}. Use: autho groups list|create|rename|rm`);
 }
 
 function printSealChanges(changes: SealChange[], diffTrusted: boolean): void {
@@ -600,13 +638,17 @@ function help(): string {
     "  daemon env render --session <id> --map <ENV=ref> [--project-file <path>] [--lease <id>] [--state-file <path>] [--json]",
     "  daemon exec --session <id> --map <ENV=ref> [--project-file <path>] [--lease <id>] [--state-file <path>] -- <cmd>",
     "  import legacy --file <path> [--skip-existing] [--vault <path>] [--json]",
-    "  secrets add --name <name> --type <password|note|otp> --value <value> [--username <v>] [--url <v>] [--description <v>] [--digits <v>] [--algorithm <v>] [--vault <path>]",
-    "  secrets list [--vault <path>] [--json]",
+    "  secrets add --name <name> --type <password|note|otp> --value <value> [--group <name>] [--username <v>] [--url <v>] [--description <v>] [--digits <v>] [--algorithm <v>] [--vault <path>]",
+    "  secrets list [--group <name>] [--vault <path>] [--json]",
     "  secrets get --ref <name-or-id> [--links] [--vault <path>] [--json]",
     "  secrets rm --ref <name-or-id> [--with-linked] [--vault <path>] [--json]",
     "  link <primary> <secret> [--vault <path>] [--json]      Show <secret> on <primary>'s page",
     "  unlink <primary> <secret> [--vault <path>] [--json]",
-    "  secrets edit --ref <name-or-id> [--new-name <v>] [--value <v>] [--username <v>] [--url <v>] [--description <v>] [--vault <path>] [--json]",
+    "  secrets edit --ref <name-or-id> [--new-name <v>] [--value <v>] [--group <name> | --no-group] [--username <v>] [--url <v>] [--description <v>] [--vault <path>] [--json]",
+    "  groups list [--vault <path>] [--json]",
+    "  groups create <name> [--vault <path>] [--json]",
+    "  groups rename <name> <new-name> [--vault <path>] [--json]",
+    "  groups rm <name> [--yes] [--vault <path>] [--json]   Secrets in it become ungrouped, never deleted",
     "  otp code --ref <name-or-id> [--vault <path>] [--json]",
     "  lease create --secret <ref> [--secret <ref>] [--ttl <seconds>] [--name <v>] [--no-links] [--vault <path>] [--json]",
     "  lease show --lease <id> [--vault <path>] [--json]",
@@ -733,7 +775,7 @@ async function main(): Promise<void> {
     const needsPassword = ([
       Scope.Secrets, Scope.Otp, Scope.Lease, Scope.Env, Scope.Exec,
       Scope.File, Scope.Files, Scope.Audit, Scope.Import, Scope.Recovery, Scope.Unlock,
-      Scope.Link, Scope.Unlink, Scope.Vault,
+      Scope.Link, Scope.Unlink, Scope.Vault, Scope.Groups,
     ] as string[]).includes(scope ?? "");
     const daemonNeedsPassword = scope === Scope.Daemon && action === Action.Unlock;
     if (needsPassword || daemonNeedsPassword) {
@@ -1155,6 +1197,7 @@ async function main(): Promise<void> {
     if (scope === Scope.Secrets && action === Action.Add) {
       output(
         session.addSecret({
+          group: getString(args, "group"),
           metadata: buildSecretMetadata(args),
           name: required(getString(args, "name"), "--name"),
           type: required(getString(args, "type"), "--type"),
@@ -1167,7 +1210,14 @@ async function main(): Promise<void> {
     }
 
     if (scope === Scope.Secrets && action === Action.List) {
-      output(session.listSecrets(), jsonMode);
+      const groupRef = getString(args, "group");
+      const groupId = groupRef ? session.getGroup(groupRef).id : null;
+      output(session.listSecrets().filter((secret) => !groupId || secret.groupId === groupId), jsonMode);
+      return;
+    }
+
+    if (scope === Scope.Groups) {
+      await runGroupsCommand(session, args, action, jsonMode);
       return;
     }
 
@@ -1216,8 +1266,13 @@ async function main(): Promise<void> {
 
     if (scope === Scope.Secrets && action === Action.Edit) {
       const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
-      const updates: Record<string, string | Record<string, unknown> | undefined> = {};
+      const updates: Record<string, string | null | Record<string, unknown> | undefined> = {};
       if (getString(args, "new-name")) updates.name = getString(args, "new-name");
+      if (getString(args, "group") && getBoolean(args, "no-group")) {
+        throw new Error("Use either --group or --no-group, not both");
+      }
+      if (getString(args, "group")) updates.group = getString(args, "group");
+      if (getBoolean(args, "no-group")) updates.group = null;
       if (getString(args, "value")) updates.value = getString(args, "value");
       if (getString(args, "username")) updates.username = getString(args, "username");
       if (getString(args, "type")) updates.type = getString(args, "type");

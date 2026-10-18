@@ -12,6 +12,6 @@ node_modules
 .env.*
 *.tsbuildinfo
 build/
-.claude/docs/
+.claude
 packages/cli/.autho
 apps/web/src/ui.generated.ts

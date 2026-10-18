@@ -4,15 +4,16 @@ import { createCliRenderer, type CliRenderer } from "@opentui/core";
 import { createRoot, useKeyboard, useRenderer, useSelectionHandler, useTerminalDimensions } from "@opentui/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { booleanPreference, defaultVaultPath, numberPreference } from "../../../packages/core/src/index.ts";
+import { UNGROUPED_LABEL, booleanPreference, defaultVaultPath, numberPreference } from "../../../packages/core/src/index.ts";
 import type { SecretRecord, VaultSession } from "../../../packages/core/src/index.ts";
 import { closeSessionAndRecordSeal } from "../../../packages/core/src/os-secrets.ts";
 import { createWebServer, type WebServer } from "../../web/src/server.ts";
 import { Clipboard } from "./clipboard.ts";
 import { Header, StatusBar, type KeyHint } from "./tui/components.tsx";
 import { AuditScreen } from "./tui/audit.tsx";
-import { AppContext, PAGES, describeCopy, type AppApi, type Command, type CopyTarget, type Page, type Timings, type Toast, type ToastKind } from "./tui/context.tsx";
+import { AppContext, PAGES, describeCopy, type AppApi, type Command, type CopyTarget, type GroupFilter, type Page, type Timings, type Toast, type ToastKind } from "./tui/context.tsx";
 import { SecretForm } from "./tui/form.tsx";
+import { GroupsScreen } from "./tui/groups.tsx";
 import { IntegrityScreen } from "./tui/integrity.tsx";
 import { LeasesScreen } from "./tui/leases.tsx";
 import { CommandPalette } from "./tui/palette.tsx";
@@ -23,8 +24,9 @@ import { VaultScreen } from "./tui/vault.tsx";
 
 type Route =
   | { name: "unlock"; notice?: string }
-  | { name: "vault"; focusId?: string }
-  | { name: "form"; editing: SecretRecord | null }
+  | { name: "vault"; focusId?: string; group?: GroupFilter }
+  | { name: "form"; editing: SecretRecord | null; group?: GroupFilter }
+  | { name: "groups" }
   | { name: "leases" }
   | { name: "audit" }
   | { name: "integrity" }
@@ -105,6 +107,11 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
     setPaletteOpen(false);
     setRoute({ name: page } as Route);
   }, []);
+  const openGroup = useCallback((group: GroupFilter) => {
+    if (!sessionRef.current) return;
+    setPaletteOpen(false);
+    setRoute({ name: "vault", group });
+  }, []);
 
   const api = useMemo<AppApi>(() => ({
     active: !paletteOpen,
@@ -114,10 +121,11 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
     quit,
     openPalette,
     go,
+    openGroup,
     setTimings,
     commandsRef,
     copyTargetRef,
-  }), [paletteOpen, toast, copy, lock, quit, openPalette, go, setTimings]);
+  }), [paletteOpen, toast, copy, lock, quit, openPalette, go, openGroup, setTimings]);
 
   /**
    * Ctrl+C never exits straight away. The first press copies the mouse
@@ -196,20 +204,28 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
     setRoute({ name: "vault" });
   }, []);
 
+  const vaultGroup = route.name === "vault" || route.name === "form" ? route.group : undefined;
   const onEdit = useCallback((id: string) => {
     const current = sessionRef.current;
     if (!current) return;
     try {
       // The form loads the stored value only on Ctrl+R, so opening it is not a read.
-      setRoute({ name: "form", editing: current.describeSecret(id) });
+      setRoute({ name: "form", editing: current.describeSecret(id), group: vaultGroup });
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e), "error");
     }
-  }, [toast]);
+  }, [toast, vaultGroup]);
 
+  const onGroupChange = useCallback((group: GroupFilter | null, focusId?: string) => {
+    setRoute({ name: "vault", focusId, group: group ?? undefined });
+  }, []);
+
+  // Read once per palette opening, not on every keystroke inside it.
+  const paletteGroups = useMemo(() => (paletteOpen && session ? groupCommands(session, openGroup) : []), [paletteOpen, session, openGroup]);
   const globalCommands: Command[] = [
     ...(session ? [
       ...PAGES.map((p) => ({ id: `go:${p.page}`, title: p.page === "settings" ? "Settings" : `Go to ${p.label}`, hint: p.key, group: "Navigate", run: () => go(p.page) })),
+      ...paletteGroups,
       { id: "lock", title: "Lock vault", hint: "ctrl+l", group: "App", run: () => lock() },
     ] : []),
     { id: "quit", title: "Quit", hint: "ctrl+c ×2", group: "App", run: quit },
@@ -234,10 +250,13 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
         editing={route.editing}
         setHints={setHints}
         revealMs={revealMs}
-        onCancel={() => setRoute({ name: "vault", focusId: route.editing?.id })}
-        onDone={(message, id) => { toast(message); setRoute({ name: "vault", focusId: id }); }}
+        defaultGroup={route.group?.id ? route.group : undefined}
+        onCancel={() => setRoute({ name: "vault", focusId: route.editing?.id, group: route.group })}
+        onDone={(message, id) => { toast(message); setRoute({ name: "vault", focusId: id, group: route.group }); }}
       />
     );
+  } else if (route.name === "groups") {
+    screen = <GroupsScreen session={session} setHints={setHints} />;
   } else if (route.name === "leases") {
     screen = <LeasesScreen session={session} setHints={setHints} />;
   } else if (route.name === "audit") {
@@ -249,10 +268,12 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
   } else {
     screen = (
       <VaultScreen
-        key={route.focusId ?? "vault"}
+        key={`${route.group ? route.group.id ?? "ungrouped" : "all"}:${route.focusId ?? ""}`}
         session={session}
         initialSelectedId={route.focusId}
-        onCreate={() => setRoute({ name: "form", editing: null })}
+        group={route.group}
+        onGroupChange={onGroupChange}
+        onCreate={() => setRoute({ name: "form", editing: null, group: route.group })}
         onEdit={onEdit}
         setHints={setHints}
         revealMs={revealMs}
@@ -282,6 +303,20 @@ export function App({ vaultPath, clipboard, revealMs: initialRevealMs, clipboard
       </box>
     </AppContext.Provider>
   );
+}
+
+/** Palette rows that open the vault narrowed to a group, plus the ungrouped secrets. */
+function groupCommands(session: VaultSession, openGroup: (group: GroupFilter) => void): Command[] {
+  try {
+    const groups = session.listGroups();
+    const ungrouped = session.listSecretIndex().filter((e) => e.groupId === null).length;
+    return [
+      ...groups.map((g) => ({ id: `group:${g.id}`, title: g.name, hint: String(g.secretCount), group: "Group", run: () => openGroup({ id: g.id, name: g.name }) })),
+      { id: "group:ungrouped", title: UNGROUPED_LABEL, hint: String(ungrouped), group: "Group", run: () => openGroup({ id: null, name: UNGROUPED_LABEL }) },
+    ];
+  } catch {
+    return [];
+  }
 }
 
 function safeRead(target: CopyTarget): string | null {

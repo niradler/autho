@@ -34,7 +34,15 @@ import {
   encryptFileArtifact,
   encryptFolderArtifact,
 } from "./artifacts.ts";
-import { AuthoDatabase, type AuditRow, type LeaseRow, type SecretRow, type VaultAuth, type VaultPasskey } from "../../storage/src/index.ts";
+import {
+  AuthoDatabase,
+  type AuditRow,
+  type GroupRow,
+  type LeaseRow,
+  type SecretRow,
+  type VaultAuth,
+  type VaultPasskey,
+} from "../../storage/src/index.ts";
 import {
   currentSealRecord,
   sealedSnapshot,
@@ -101,6 +109,9 @@ function decodePrfOutput(value: string): Buffer {
 
 export type SecretRecord = {
   createdAt: string;
+  /** Name of the group the secret is filed under; null when ungrouped. */
+  group: string | null;
+  groupId: string | null;
   id: string;
   metadata: Record<string, unknown>;
   name: string;
@@ -120,6 +131,39 @@ export type SecretIndexEntry = SecretSummary & {
   url: string | null;
   username: string | null;
 };
+
+/** A named set of secrets. A secret is in at most one group. */
+export type GroupSummary = {
+  createdAt: string;
+  id: string;
+  name: string;
+  /** How many secrets are in the group. */
+  secretCount: number;
+  updatedAt: string;
+};
+
+/** Label for secrets with no group in list views; reserved, so no group can take it. */
+export const UNGROUPED_LABEL = "(ungrouped)";
+
+const GROUP_NAME_MAX = 64;
+
+/** Trims a group name and rejects empty, overlong, control-character or reserved names. */
+export function normalizeGroupName(name: string | undefined): string {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) {
+    throw new Error("Group name is required");
+  }
+  if (trimmed.length > GROUP_NAME_MAX) {
+    throw new Error(`Group name is longer than ${GROUP_NAME_MAX} characters`);
+  }
+  if ([...trimmed].some((char) => char.charCodeAt(0) < 0x20 || char.charCodeAt(0) === 0x7f)) {
+    throw new Error("Group name can't contain control characters");
+  }
+  if (trimmed.toLowerCase() === UNGROUPED_LABEL) {
+    throw new Error(`"${UNGROUPED_LABEL}" is reserved`);
+  }
+  return trimmed;
+}
 
 /** A secret on the other end of a link: identifying fields only, never the value. */
 export type LinkedSecret = { id: string; name: string; type: SecretType };
@@ -1298,7 +1342,19 @@ export class VaultSession {
     recordAudit(this.db, { eventType, leaseId, message, metadata, source: this.source, subjectRef, subjectType });
   }
 
-  private unwrapSecret(row: SecretRow): SecretRecord {
+  /** Group names by id, so list views resolve groups without a lookup per secret. */
+  private groupNames(): Map<string, string> {
+    return new Map(this.db.listGroups().map((group) => [group.id, group.name]));
+  }
+
+  /** A row's group; a group_id whose group no longer exists reads as ungrouped. */
+  private groupOf(row: SecretRow, groups?: Map<string, string>): { group: string | null; groupId: string | null } {
+    if (!row.groupId) return { group: null, groupId: null };
+    const name = groups ? groups.get(row.groupId) : this.db.findGroup(row.groupId)?.name;
+    return name === undefined ? { group: null, groupId: null } : { group: name, groupId: row.groupId };
+  }
+
+  private unwrapSecret(row: SecretRow, groups?: Map<string, string>): SecretRecord {
     const wrappedKey = JSON.parse(row.wrappedKey) as EncryptedBlob;
     const payload = JSON.parse(row.payload) as EncryptedBlob;
     const dek = decryptWithKey(wrappedKey, this.rootKey, `autho:secret:${row.id}:dek`);
@@ -1308,6 +1364,7 @@ export class VaultSession {
 
     return {
       createdAt: row.createdAt,
+      ...this.groupOf(row, groups),
       id: row.id,
       metadata: normalizeMetadata(secret.metadata),
       name: row.name,
@@ -1373,6 +1430,8 @@ export class VaultSession {
   }
 
   addSecret(input: {
+    /** An existing group's name or id. */
+    group?: string;
     metadata?: Record<string, unknown>;
     name: string;
     type: string;
@@ -1387,12 +1446,13 @@ export class VaultSession {
   }
 
   private insertNewSecret(
-    input: { metadata?: Record<string, unknown>; name: string; username?: string; value: string },
+    input: { group?: string; metadata?: Record<string, unknown>; name: string; username?: string; value: string },
     type: SecretType,
   ): SecretSummary {
     if (this.db.findSecret(input.name)) {
       throw new Error(`Secret already exists: ${input.name}`);
     }
+    const group = input.group ? this.requireGroup(input.group) : null;
 
     const now = new Date().toISOString();
     const id = randomId();
@@ -1410,6 +1470,7 @@ export class VaultSession {
 
     this.db.insertSecret({
       createdAt: now,
+      groupId: group?.id ?? null,
       id,
       name: input.name,
       payload: JSON.stringify(payload),
@@ -1422,9 +1483,14 @@ export class VaultSession {
       name: input.name,
       type,
     });
+    if (group) {
+      this.auditGrouped(id, input.name, null, group);
+    }
 
     return {
       createdAt: now,
+      group: group?.name ?? null,
+      groupId: group?.id ?? null,
       id,
       name: input.name,
       type,
@@ -1435,6 +1501,8 @@ export class VaultSession {
   updateSecret(
     ref: string,
     updates: {
+      /** An existing group's name or id; null takes the secret out of its group. */
+      group?: string | null;
       metadata?: Record<string, unknown>;
       name?: string;
       type?: string;
@@ -1447,9 +1515,22 @@ export class VaultSession {
 
   private applySecretUpdate(
     ref: string,
-    updates: { metadata?: Record<string, unknown>; name?: string; type?: string; username?: string; value?: string },
+    updates: {
+      group?: string | null;
+      metadata?: Record<string, unknown>;
+      name?: string;
+      type?: string;
+      username?: string;
+      value?: string;
+    },
   ): SecretSummary {
     const existing = this.getSecretOrThrow(ref);
+    const newGroup = updates.group === undefined
+      ? (existing.groupId ? { id: existing.groupId, name: existing.group! } : null)
+      : updates.group === null || updates.group === ""
+        ? null
+        : this.requireGroup(updates.group);
+    const regrouped = (newGroup?.id ?? null) !== existing.groupId;
 
     // Check name uniqueness if renaming
     if (updates.name && updates.name !== existing.name) {
@@ -1483,6 +1564,7 @@ export class VaultSession {
     );
 
     this.db.updateSecret(existing.id, {
+      ...(regrouped ? { groupId: newGroup?.id ?? null } : {}),
       name: newName,
       payload: JSON.stringify(payload),
       type: newType,
@@ -1495,9 +1577,15 @@ export class VaultSession {
       name: newName,
       ...(renamed ? { previousName: existing.name } : {}),
     });
+    if (regrouped) {
+      const previous = existing.groupId ? { id: existing.groupId, name: existing.group! } : null;
+      this.auditGrouped(existing.id, newName, previous, newGroup);
+    }
 
     return {
       createdAt: existing.createdAt,
+      group: newGroup?.name ?? null,
+      groupId: newGroup?.id ?? null,
       id: existing.id,
       name: newName,
       type: newType,
@@ -1554,8 +1642,10 @@ export class VaultSession {
   }
 
   listSecrets(): SecretSummary[] {
+    const groups = this.groupNames();
     return this.db.listSecrets().map((row) => ({
       createdAt: row.createdAt,
+      ...this.groupOf(row, groups),
       id: row.id,
       name: row.name,
       type: normalizeSecretType(row.type),
@@ -1574,12 +1664,15 @@ export class VaultSession {
     for (const link of this.db.listLinks()) {
       linkCounts.set(link.primaryId, (linkCounts.get(link.primaryId) ?? 0) + 1);
     }
+    const groups = this.groupNames();
     const entries = this.db.listSecrets().map((row) => {
-      const secret = this.unwrapSecret(row);
+      const secret = this.unwrapSecret(row, groups);
       const { url, description } = secret.metadata;
       return {
         createdAt: secret.createdAt,
         description: typeof description === "string" && description ? description : null,
+        group: secret.group,
+        groupId: secret.groupId,
         id: secret.id,
         linkCount: linkCounts.get(secret.id) ?? 0,
         name: secret.name,
@@ -1687,6 +1780,87 @@ export class VaultSession {
       linkedFrom: resolve(this.db.listLinksTo(secret.id).map((link) => link.primaryId)),
       links: resolve(this.db.listLinksFrom(secret.id).map((link) => link.linkedId)),
     };
+  }
+
+  /** Every group, by name, with how many secrets it holds. */
+  listGroups(): GroupSummary[] {
+    return this.db.listGroups();
+  }
+
+  /** A group by name (ignoring case) or id. */
+  getGroup(ref: string): GroupSummary {
+    const group = this.requireGroup(ref);
+    return this.listGroups().find((entry) => entry.id === group.id)!;
+  }
+
+  createGroup(name: string): GroupSummary {
+    const groupName = normalizeGroupName(name);
+    return this.sealedWrite(() => {
+      if (this.db.findGroup(groupName)) {
+        throw new Error(`Group already exists: ${groupName}`);
+      }
+      const now = new Date().toISOString();
+      const group: GroupRow = { createdAt: now, id: randomId(), name: groupName, updatedAt: now };
+      this.db.insertGroup(group);
+      this.audit("group.created", "group", group.id, `Created group ${groupName}`, { name: groupName });
+      return { ...group, secretCount: 0 };
+    });
+  }
+
+  /** Renames a group. Changing only the case of the name is allowed. */
+  renameGroup(ref: string, name: string): GroupSummary {
+    const groupName = normalizeGroupName(name);
+    return this.sealedWrite(() => {
+      const group = this.requireGroup(ref);
+      const conflict = this.db.findGroup(groupName);
+      if (conflict && conflict.id !== group.id) {
+        throw new Error(`Group already exists: ${conflict.name}`);
+      }
+      if (group.name !== groupName) {
+        this.db.renameGroup(group.id, groupName, new Date().toISOString());
+        this.audit("group.renamed", "group", group.id, `Renamed group ${group.name} to ${groupName}`, {
+          name: groupName,
+          previousName: group.name,
+        });
+      }
+      return this.getGroup(group.id);
+    });
+  }
+
+  /** Deletes a group. Its secrets are kept and become ungrouped. */
+  removeGroup(ref: string): { id: string; name: string; ungrouped: number } {
+    return this.sealedWrite(() => {
+      const group = this.requireGroup(ref);
+      const ungrouped = this.db.deleteGroup(group.id, new Date().toISOString());
+      this.audit("group.deleted", "group", group.id, `Deleted group ${group.name}, ${ungrouped} secret${ungrouped === 1 ? "" : "s"} ungrouped`, {
+        name: group.name,
+        ungrouped,
+      });
+      return { id: group.id, name: group.name, ungrouped };
+    });
+  }
+
+  private requireGroup(ref: string): GroupRow {
+    const group = this.db.findGroup(ref.trim());
+    if (!group) {
+      throw new Error(`Group not found: ${ref}`);
+    }
+    return group;
+  }
+
+  private auditGrouped(
+    secretId: string,
+    secretName: string,
+    from: { id: string; name: string } | null,
+    to: { id: string; name: string } | null,
+  ): void {
+    const message = to ? `Moved ${secretName} to group ${to.name}` : `Removed ${secretName} from group ${from?.name}`;
+    this.audit("secret.grouped", "secret", secretId, message, {
+      fromGroupId: from?.id ?? null,
+      groupId: to?.id ?? null,
+      groupName: to?.name ?? null,
+      name: secretName,
+    });
   }
 
   private requireLinkedSecret(ref: string): LinkedSecret {
