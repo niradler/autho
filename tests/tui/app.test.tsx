@@ -210,17 +210,17 @@ describe("Navigation", () => {
   test("the header shows the page tabs and the command palette key stays pinned", async () => {
     await renderUnlocked(160);
     const frame = await settle();
-    for (const tab of ["1 Vault", "2 Leases", "3 Audit", "4 Integrity", "5 Settings"]) expect(frame).toContain(tab);
+    for (const tab of ["1 Vault", "2 Groups", "3 Leases", "4 Audit", "5 Integrity", "6 Settings"]) expect(frame).toContain(tab);
     expect(frame).toContain("commands");
   });
 
   test("number keys switch tabs and esc returns to the vault", async () => {
     await renderUnlocked();
-    t!.mockInput.pressKey("2");
-    await frameContaining("No active leases");
     t!.mockInput.pressKey("3");
-    await frameContaining("filter by event");
+    await frameContaining("No active leases");
     t!.mockInput.pressKey("4");
+    await frameContaining("filter by event");
+    t!.mockInput.pressKey("5");
     await frameContaining("Vault seal");
     t!.mockInput.pressEscape();
     await frameContaining("octocat");
@@ -228,7 +228,7 @@ describe("Navigation", () => {
 
   test("leases: create one over a secret, then revoke it", async () => {
     await renderUnlocked();
-    t!.mockInput.pressKey("2");
+    t!.mockInput.pressKey("3");
     await frameContaining("No active leases");
     t!.mockInput.pressKey("n");
     await frameContaining("New lease");
@@ -253,7 +253,7 @@ describe("Navigation", () => {
 
   test("leases: a bad duration is rejected without creating anything", async () => {
     await renderUnlocked();
-    t!.mockInput.pressKey("2");
+    t!.mockInput.pressKey("3");
     await frameContaining("No active leases");
     t!.mockInput.pressKey("n");
     await frameContaining("New lease");
@@ -268,7 +268,7 @@ describe("Navigation", () => {
 
   test("audit: lists events and filters them", async () => {
     await renderUnlocked();
-    t!.mockInput.pressKey("3");
+    t!.mockInput.pressKey("4");
     await frameContaining("events · last 100");
     t!.mockInput.pressKey("/");
     await settle();
@@ -290,7 +290,7 @@ describe("Navigation", () => {
     raw.close();
 
     await renderUnlocked();
-    t!.mockInput.pressKey("4");
+    t!.mockInput.pressKey("5");
     await frameContaining("Changed outside autho");
     expect(await frameContaining("secret_links")).toContain("added");
     t!.mockInput.pressKey("u");
@@ -310,7 +310,7 @@ describe("Navigation", () => {
     const backup = join(dir, "legacy.json");
     writeFileSync(backup, JSON.stringify([{ name: "legacy-api", type: "note", value: "abc" }]));
     await renderUnlocked();
-    t!.mockInput.pressKey("4");
+    t!.mockInput.pressKey("5");
     await frameContaining("Intact");
     t!.mockInput.pressArrow("down");
     t!.mockInput.pressEnter();
@@ -358,7 +358,7 @@ describe("Navigation", () => {
 
   test("settings opens on the sidebar; arrows change section until → enters it", async () => {
     await renderUnlocked();
-    t!.mockInput.pressKey("5");
+    t!.mockInput.pressKey("6");
     await frameContaining("Vault file");
     t!.mockInput.pressArrow("down");
     await frameContaining("Master password");
@@ -469,10 +469,157 @@ describe("Links", () => {
   });
 });
 
+describe("Groups", () => {
+  test("the Groups tab creates a group and deletes it after confirming, ungrouping its secrets", async () => {
+    await renderUnlocked();
+    t!.mockInput.pressKey("2");
+    await frameContaining("No groups yet");
+    t!.mockInput.pressKey("n");
+    await frameContaining("New group");
+    await settle();
+    await t!.mockInput.typeText("homelab");
+    t!.mockInput.pressEnter();
+    await frameContaining('Created group "homelab"');
+    sink.current!.updateSecret("github", { group: "homelab" });
+    t!.mockInput.pressKey("r");
+    await frameContaining("1 group");
+    t!.mockInput.pressKey("x");
+    await frameContaining("1 secret become ungrouped, none deleted");
+    t!.mockInput.pressKey("y");
+    await frameContaining('Deleted group "homelab"');
+    expect(sink.current!.listGroups()).toEqual([]);
+    expect(sink.current!.describeSecret("github").group).toBeNull();
+  });
+
+  test("enter on a group opens the vault narrowed to it; esc clears the filter, then the group", async () => {
+    const setup = VaultService.unlock(vaultPath, PASSWORD);
+    setup.createGroup("homelab");
+    setup.addSecret({ group: "homelab", name: "proxmox", type: "password", value: "pw" });
+    setup.addSecret({ group: "homelab", name: "nas", type: "password", value: "pw" });
+    setup.close();
+
+    await renderUnlocked();
+    t!.mockInput.pressKey("2");
+    await frameContaining("1 group");
+    t!.mockInput.pressEnter();
+    let frame = await frameContaining("homelab · 2 secrets");
+    expect(frame).not.toContain("octocat");
+    t!.mockInput.pressKey("/");
+    await settle();
+    await t!.mockInput.typeText("prox");
+    await frameContaining("homelab · 1/2 secrets");
+    t!.mockInput.pressEscape();
+    await frameContaining("homelab · 2 secrets");
+    t!.mockInput.pressEscape();
+    frame = await frameContaining("3/3 secrets");
+    expect(frame).toContain("octocat");
+  });
+
+  test("the palette jumps to a group and to the ungrouped secrets", async () => {
+    const setup = VaultService.unlock(vaultPath, PASSWORD);
+    setup.createGroup("homelab");
+    setup.addSecret({ group: "homelab", name: "proxmox", type: "password", value: "pw" });
+    setup.close();
+
+    await renderUnlocked();
+    t!.mockInput.pressKey("k", { ctrl: true });
+    await frameContaining("Commands");
+    await settle();
+    await t!.mockInput.typeText("group homelab");
+    await frameContaining("Group · homelab");
+    t!.mockInput.pressEnter();
+    const frame = await frameContaining("homelab · 1 secrets");
+    expect(frame).toContain("Group       homelab");
+    t!.mockInput.pressKey("k", { ctrl: true });
+    await frameContaining("Commands");
+    await settle();
+    await t!.mockInput.typeText("ungrouped");
+    await frameContaining("Group · (ungrouped)");
+    t!.mockInput.pressEnter();
+    expect(await frameContaining("(ungrouped) · 1 secrets")).toContain("octocat");
+  });
+
+  test("a in the Groups tab adds secrets to the group and enter again takes them out", async () => {
+    const setup = VaultService.unlock(vaultPath, PASSWORD);
+    setup.createGroup("homelab");
+    setup.close();
+
+    await renderUnlocked();
+    t!.mockInput.pressKey("2");
+    await frameContaining("1 group");
+    t!.mockInput.pressKey("a");
+    await frameContaining("Add to homelab");
+    await settle();
+    await t!.mockInput.typeText("github");
+    t!.mockInput.pressEnter();
+    await frameContaining("Added github to homelab");
+    expect(sink.current!.describeSecret("github").group).toBe("homelab");
+    t!.mockInput.pressEnter();
+    await frameContaining("Removed github from homelab");
+    expect(sink.current!.describeSecret("github").group).toBeNull();
+    t!.mockInput.pressEnter();
+    await frameContaining("Added github to homelab");
+    t!.mockInput.pressEscape();
+    await settle();
+    await t!.renderOnce();
+    expect(t!.captureCharFrame()).not.toContain("Add to homelab");
+    expect(sink.current!.describeSecret("github").group).toBe("homelab");
+  });
+
+  test("the mouse wheel scrolls the vault list and the add-secrets picker without dropping ticks", async () => {
+    const setup = VaultService.unlock(vaultPath, PASSWORD);
+    setup.createGroup("homelab");
+    for (let i = 0; i < 30; i++) setup.addSecret({ name: `s${String(i).padStart(2, "0")}`, type: "password", value: "pw" });
+    setup.close();
+
+    await renderUnlocked();
+    await frameContaining("31/31 secrets");
+    for (let i = 0; i < 5; i++) await t!.mockMouse.scroll(10, 10, "down");
+    await settle();
+    t!.mockInput.pressKey("e");
+    await frameContaining("leave empty to keep the current value");
+    expect(t!.captureCharFrame()).toContain("Edit s14");
+    t!.mockInput.pressEscape();
+    await frameContaining("31/31 secrets");
+
+    t!.mockInput.pressKey("2");
+    await frameContaining("1 group");
+    t!.mockInput.pressKey("a");
+    await frameContaining("Add to homelab");
+    await settle();
+    // Over the picker the wheel scrolls its list, not the groups list behind it; enter takes the row under the pointer.
+    for (let i = 0; i < 5; i++) await t!.mockMouse.scroll(30, 10, "down");
+    await settle();
+    t!.mockInput.pressEnter();
+    await frameContaining("Added s17 to homelab");
+  });
+
+  test("the secret form picks an existing group", async () => {
+    const setup = VaultService.unlock(vaultPath, PASSWORD);
+    setup.createGroup("homelab");
+    setup.close();
+
+    await renderUnlocked();
+    t!.mockInput.pressKey("e");
+    await frameContaining("leave empty to keep the current value");
+    t!.mockInput.pressArrow("down");
+    await frameContaining("enter to choose");
+    t!.mockInput.pressEnter();
+    await frameContaining("search groups");
+    await settle();
+    await t!.mockInput.typeText("home");
+    t!.mockInput.pressEnter();
+    await settle();
+    t!.mockInput.pressKey("s", { ctrl: true });
+    await frameContaining('Saved "github"');
+    expect(sink.current!.describeSecret("github").group).toBe("homelab");
+  });
+});
+
 describe("Settings", () => {
   async function openSettings(): Promise<void> {
     await renderUnlocked();
-    t!.mockInput.pressKey("5");
+    t!.mockInput.pressKey("6");
     await frameContaining("Vault file");
   }
 
@@ -491,7 +638,7 @@ describe("Settings", () => {
 
   test("shows the web UI served alongside the TUI", async () => {
     await renderUnlocked(120, 30_000, { url: "http://localhost:8061", note: "running while the TUI is open" });
-    t!.mockInput.pressKey("5");
+    t!.mockInput.pressKey("6");
     await frameContaining("Vault file");
     const frame = await goToSection("Agents & services");
     expect(frame).toContain("Web UI with TUI");

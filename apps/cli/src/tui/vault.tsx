@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { LinkedSecret, SecretIndexEntry, SecretLinks, VaultSession } from "../../../../packages/core/src/index.ts";
 import { Button, FieldRow, TextField, useNow, type KeyHint } from "./components.tsx";
-import { handlePageKey, useApp, useScreenContext, type Command } from "./context.tsx";
+import { handlePageKey, useApp, useScreenContext, type Command, type GroupFilter } from "./context.tsx";
 import { LinkPicker } from "./links.tsx";
 import { MASK, TIMINGS, theme, typeBadge, typeLabel } from "./theme.ts";
 import { fuzzyFilter, hostOf, isEnter, openUrl, truncate } from "./util.ts";
@@ -19,10 +19,14 @@ const PANES: Pane[] = ["search", "list", "actions"];
 /** Wide terminals get a list + preview layout; narrow ones switch between the two. */
 const WIDE_MIN_COLUMNS = 96;
 
-export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setHints, revealMs }: {
+export function VaultScreen({ session, initialSelectedId, group, onGroupChange, onCreate, onEdit, setHints, revealMs }: {
   session: VaultSession;
   /** Secret to select on mount, e.g. the one just created or edited. */
   initialSelectedId?: string;
+  /** Narrows the list to one group's secrets. */
+  group?: GroupFilter;
+  /** Changes or clears the group filter, selecting `focusId` afterwards. */
+  onGroupChange: (group: GroupFilter | null, focusId?: string) => void;
   onCreate: () => void;
   onEdit: (id: string) => void;
   setHints: (hints: KeyHint[]) => void;
@@ -58,10 +62,20 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
 
   useEffect(reload, [reload]);
 
+  // A group shows only the secrets assigned to it; linked secrets stay in the detail pane.
+  const scoped = useMemo(() => (group ? entries.filter((e) => e.groupId === group.id) : entries), [entries, group]);
   const filtered = useMemo(
-    () => fuzzyFilter(entries, query, (e) => [e.name, e.username, e.url, e.description, typeLabel(e.type)]),
-    [entries, query],
+    () => fuzzyFilter(scoped, query, (e) => [e.name, e.username, e.url, e.description, typeLabel(e.type)]),
+    [scoped, query],
   );
+
+  /** Selects a secret, leaving the group view when the secret is outside it. */
+  const jumpTo = useCallback((id: string, openActions = false) => {
+    setQuery("");
+    if (group && !scoped.some((e) => e.id === id)) { onGroupChange(null, id); return; }
+    setSelectedId(id);
+    if (openActions) { setDetailOpen(true); setPane("actions"); }
+  }, [group, scoped, onGroupChange]);
 
   const selectedIndex = Math.max(0, filtered.findIndex((e) => e.id === selectedId));
   const selected: SecretIndexEntry | null = filtered[selectedIndex] ?? null;
@@ -235,10 +249,13 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
     app.toast(opened ? `Opening ${hostOf(entry.url)}` : "Only http(s) URLs can be opened", opened ? "info" : "error");
   };
 
+  // Functional update: wheel ticks and key repeat can land several moves before a re-render.
   const move = (delta: number) => {
     if (filtered.length === 0) return;
-    const next = Math.min(filtered.length - 1, Math.max(0, selectedIndex + delta));
-    setSelectedId(filtered[next]!.id);
+    setSelectedId((id) => {
+      const index = Math.max(0, filtered.findIndex((e) => e.id === id));
+      return filtered[Math.min(filtered.length - 1, Math.max(0, index + delta))]!.id;
+    });
   };
 
   const showDetail = wide || detailOpen;
@@ -313,11 +330,12 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
       case "r": reload(); app.toast("Reloaded", "info"); return;
     }
 
-    // Esc steps back one level: actions → list, then hides a revealed value, then clears the filter.
+    // Esc steps back one level: actions → list, then hides a revealed value, then clears the filter, then the group.
     if (key.name === "escape") {
       if (pane === "actions") focusPane("list");
       else if (revealed) setRevealed(null);
       else if (query) setQuery("");
+      else if (group) onGroupChange(null, selected?.id);
       return;
     }
     if (!selected) return;
@@ -388,7 +406,7 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
         title: `Go to ${link.name}`,
         hint: typeLabel(link.type),
         group: "Linked",
-        run: () => { setQuery(""); setSelectedId(link.id); },
+        run: () => jumpTo(link.id),
       });
     }
     for (const entry of entries) {
@@ -397,11 +415,12 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
         title: entry.name,
         hint: entry.username ?? (entry.url ? hostOf(entry.url) : typeLabel(entry.type)),
         group: "Jump to",
-        run: () => { setQuery(""); setSelectedId(entry.id); setDetailOpen(true); setPane("actions"); },
+        run: () => jumpTo(entry.id, true),
       });
     }
+    if (group) list.push({ id: "group:clear", title: `Show all secrets (leave ${group.name})`, hint: "esc", group: "Vault", run: () => onGroupChange(null, selected?.id) });
     return list;
-  }, [entries, selected, revealed, links, linkedOtpSecret, onCreate, onEdit, reload, copyPrimary, copyUsername, copyUrl, toggleReveal, copyLinkedOtp]);
+  }, [entries, selected, revealed, links, linkedOtpSecret, group, onCreate, onEdit, onGroupChange, reload, copyPrimary, copyUsername, copyUrl, toggleReveal, copyLinkedOtp, jumpTo]);
 
   useScreenContext(commands, selected ? {
     label: selected.type === "otp" ? "OTP code" : selected.type === "note" ? "Note" : "Password",
@@ -416,8 +435,9 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
     else if (pane === "actions") hints = [["←→", "choose"], ["enter", "run"], ["↑↓", "secret"], ["esc", "back"]];
     else if (!showDetail) hints = [["↑↓", "move"], ["enter", "open"], ["c", "copy"], ["/", "search"], ["n", "new"], ["q", "quit"]];
     else hints = [["↑↓", "move"], ["enter", "copy"], ["→/tab", "actions"], ["/", "search"], ["n", "new"], ["q", "quit"]];
+    if (group && pane === "list" && !confirmDelete) hints.splice(hints.length - 1, 0, ["esc", query ? "clear" : "all secrets"]);
     setHints(hints);
-  }, [confirmDelete, links, searchFocused, pane, showDetail, setHints]);
+  }, [confirmDelete, links, searchFocused, pane, showDetail, group, query, setHints]);
 
   const listWidth = wide ? Math.max(32, Math.floor(width * 0.38)) : width;
   const offset = Math.max(0, Math.min(selectedIndex - Math.floor(listHeight / 2), filtered.length - listHeight));
@@ -431,13 +451,15 @@ export function VaultScreen({ session, initialSelectedId, onCreate, onEdit, setH
       border
       borderStyle="rounded"
       borderColor={theme.border}
-      title={` ${filtered.length}/${entries.length} secrets `}
+      title={group
+        ? ` ${group.name} · ${filtered.length === scoped.length ? "" : `${filtered.length}/`}${scoped.length} secrets `
+        : ` ${filtered.length}/${entries.length} secrets `}
       titleColor={theme.muted}
       onMouseScroll={(event) => move(event.scroll?.direction === "up" ? -3 : 3)}
     >
       {filtered.length === 0 ? (
         <box padding={1}>
-          <text fg={theme.dim}>{entries.length === 0 ? "No secrets yet — press n to add one." : `No match for "${query}".`}</text>
+          <text fg={theme.dim}>{scoped.length > 0 ? `No match for "${query}".` : group ? `No secrets in ${group.name} — press n to add one.` : "No secrets yet — press n to add one."}</text>
         </box>
       ) : visible.map((entry) => {
         const isSelected = entry.id === selected?.id;
@@ -566,6 +588,7 @@ function Detail({ entry, revealed, otp, now, confirmDelete, links, linkedOtp, ac
         />
         {entry.url ? <FieldRow label="URL" value={entry.url} color={theme.info} /> : null}
         {entry.description ? <FieldRow label="Notes" value={entry.description} /> : null}
+        {entry.group ? <FieldRow label="Group" value={entry.group} /> : null}
         <FieldRow label="Updated" value={entry.updatedAt.slice(0, 16).replace("T", " ")} color={theme.dim} />
       </box>
 

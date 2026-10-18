@@ -26,9 +26,10 @@ Or download a standalone binary for macOS, Linux or Windows from [GitHub Release
 - `env render`, `env sync`, and `exec`
 - Short-lived secret leases with audit and revoke
 - Secret linking: keep a login's OTP, recovery codes or keys together under one primary secret
+- Groups: put each secret in at most one group (`homelab`, `work`) and list, filter or jump to it from the CLI, TUI, web UI and command palette
 - Vault seal: edits made to the SQLite file outside autho are detected and block agent access
 - Local daemon unlock flow for repeated agent tasks
-- Local-only web UI with everything the CLI and TUI can do: secrets, links, OTP, leases, audit, settings, passkeys. It also runs alongside the TUI while the TUI is open
+- Local-only web UI with everything the CLI and TUI can do: secrets, links, groups, OTP, leases, audit, settings, passkeys. It also runs alongside the TUI while the TUI is open
 - Native OS secret store integration (macOS Keychain, Linux Secret Service, Windows Credential Manager)
 
 ## Security Model
@@ -48,7 +49,7 @@ Or download a standalone binary for macOS, Linux or Windows from [GitHub Release
 - Copied secrets are cleared from the clipboard after 30 seconds, only if the clipboard still holds them — also after the TUI exits
 - Audit events record access patterns without storing secret values
 - Each audit event records where it happened (`cli`, `tui`, `web`, `daemon`) and the lease it went through, if any. Failed unlocks are logged with the method used, never the input. Events older than `auditRetentionDays` (default 90, `0` keeps them forever) are deleted on unlock
-- The vault is **sealed**: an HMAC (keyed from the root key) covers secrets, links, leases and settings. Any change made without the key stops `env`, `exec` and lease reads until `autho vault reseal`; revoking a lease always works
+- The vault is **sealed**: an HMAC (keyed from the root key) covers secrets, groups, links, leases and settings. Any change made without the key stops `env`, `exec` and lease reads until `autho vault reseal`; revoking a lease always works
 - `env` and `exec` inject an OTP secret's current code, never its seed
 - Runtime state defaults to `~/.autho` and can be isolated with `AUTHO_HOME`
 
@@ -165,7 +166,7 @@ Run `autho` with no arguments to open the TUI.
 | `n` / `e` / `d` | New / edit / delete (`a` in the delete prompt also deletes linked secrets) |
 | `l` | Link or unlink secrets under the selected one |
 | `t` | Show and copy the linked OTP's code |
-| `1`–`5` | Switch tab: Vault, Leases, Audit, Integrity, Settings |
+| `1`–`6` | Switch tab: Vault, Groups, Leases, Audit, Integrity, Settings |
 | `q` | Quit |
 | `ctrl+k` / `?` | Command palette: every action on the current screen, plus jump to any secret |
 | `ctrl+l` | Lock now |
@@ -179,6 +180,28 @@ Run `autho` with no arguments to open the TUI.
 
 - A value revealed in the editor hides again after the reveal timeout, when you leave the field, or when the palette opens.
 - A secret's linked secrets show on its page; the palette has "Go to" for each one.
+
+## Groups
+
+A group is a named folder for secrets, such as `homelab` or `work`. Each secret is in at most one group. Group names are unique, ignoring case.
+
+```bash
+autho groups create homelab
+autho secrets add --name proxmox --type password --value ... --group homelab
+autho secrets edit --ref nas --group homelab      # move a secret; --no-group takes it out
+autho secrets list --group homelab
+autho groups list                                 # names and secret counts
+autho groups rename homelab lab
+autho groups rm lab --yes                         # its secrets become ungrouped, none are deleted
+```
+
+`--group` must name an existing group. Groups are created in the Groups tab or with `groups create`, never from the secret form.
+
+- In the TUI, tab `2` lists the groups with their counts, plus `(ungrouped)`. `n` creates a group, `a` adds secrets to it (a searchable list; `enter` adds or removes one, and a secret from another group moves), `e` renames it and `x` deletes it after a confirm. `enter` opens the Vault filtered to the group. The web UI's Groups screen has the same keys. To move a single secret, edit it and pick the group.
+- `ctrl+k`, then type a group's name, also opens the Vault filtered to it. While the Vault is filtered, `esc` clears the search first and then the group.
+- A group's list shows only the secrets in it. Linked secrets in other groups stay one step away, on the secret's page.
+- The web UI has the same Groups screen (key `2`) and palette entries, a group picker in the secret form, and an × on the Vault title to clear the filter.
+- Groups are covered by the vault seal: a group added, renamed or moved outside autho shows up in `autho vault verify`. Creating, renaming and deleting a group, and moving a secret, are audited.
 
 ## Settings
 

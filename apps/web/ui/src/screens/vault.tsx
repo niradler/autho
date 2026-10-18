@@ -1,4 +1,4 @@
-import { Copy, ExternalLink, Eye, EyeOff, KeyRound, Link2, Pencil, Plus, RefreshCw, Search, Trash2, Unlink } from "lucide-react";
+import { Copy, ExternalLink, Eye, EyeOff, KeyRound, Link2, Pencil, Plus, RefreshCw, Search, Trash2, Unlink, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -29,7 +29,7 @@ export function VaultScreen() {
   const [dialog, setDialog] = useState<DialogState>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const { setModalOpen } = app;
+  const { setModalOpen, vaultGroup: group, openGroup } = app;
 
   const load = useCallback(async (quiet = true) => {
     try {
@@ -49,9 +49,11 @@ export function VaultScreen() {
     return () => setModalOpen(false);
   }, [dialog, setModalOpen]);
 
+  // A group scope narrows the list to its members; the text filter applies within it.
+  const scoped = useMemo(() => (secrets && group ? secrets.filter((s) => s.groupId === group.id) : secrets), [secrets, group]);
   const filtered = useMemo(
-    () => (secrets ? fuzzyFilter(secrets, query, (s) => [s.name, s.username, s.url, s.description]) : []),
-    [secrets, query],
+    () => (scoped ? fuzzyFilter(scoped, query, (s) => [s.name, s.username, s.url, s.description]) : []),
+    [scoped, query],
   );
 
   // Keep a valid selection as the list or the filter changes.
@@ -105,10 +107,12 @@ export function VaultScreen() {
     setSelectedId(filtered[next]!.id);
   }, [filtered, selectedId]);
 
+  // A secret outside the current group leaves the group scope so it can be shown.
   const jumpTo = useCallback((id: string) => {
     setQuery("");
+    if (group && secrets?.find((s) => s.id === id)?.groupId !== group.id) openGroup(null);
     setSelectedId(id);
-  }, []);
+  }, [group, secrets, openGroup]);
 
   // ── Actions ────────────────────────────────────────────────────
 
@@ -214,6 +218,7 @@ export function VaultScreen() {
         Escape: () => {
           if (revealed) setRevealed(null);
           else if (query) setQuery("");
+          else if (group) openGroup(null);
         },
       };
       const action = actions[event.key];
@@ -223,7 +228,7 @@ export function VaultScreen() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [app.paletteOpen, app.modalOpen, move, load, copyValue, copyUsername, copyUrl, toggleReveal, openUrl, openDialog, copyLinkedOtp, revealed, query]);
+  }, [app.paletteOpen, app.modalOpen, move, load, copyValue, copyUsername, copyUrl, toggleReveal, openUrl, openDialog, copyLinkedOtp, revealed, query, group, openGroup]);
 
   // ── Palette and status bar ─────────────────────────────────────
 
@@ -249,6 +254,7 @@ export function VaultScreen() {
       { id: "search", title: "Search secrets", group: "Vault", hint: "/", run: () => searchRef.current?.focus() },
       { id: "reload", title: "Reload", group: "Vault", hint: "r", run: () => void load(false) },
     );
+    if (group) list.push({ id: "all", title: `Show all secrets (leave ${group.name})`, group: "Vault", hint: "esc", run: () => openGroup(null) });
     for (const linked of [...(selected?.links ?? []), ...(selected?.linkedFrom ?? [])]) {
       list.push({ id: `linked:${linked.id}`, title: `Go to ${linked.name}`, group: "Linked", run: () => jumpTo(linked.id) });
     }
@@ -256,13 +262,14 @@ export function VaultScreen() {
       list.push({ id: `jump:${secret.id}`, title: secret.name, group: "Jump to", keywords: [secret.username, secret.url].filter(Boolean).join(" "), run: () => jumpTo(secret.id) });
     }
     return list;
-  }, [entry, selected, secrets, revealed, copyValue, copyUsername, copyUrl, openUrl, toggleReveal, copyLinkedOtp, openDialog, load, jumpTo]);
+  }, [entry, selected, secrets, revealed, copyValue, copyUsername, copyUrl, openUrl, toggleReveal, copyLinkedOtp, openDialog, load, jumpTo, group, openGroup]);
 
   const hints = useMemo<KeyHint[]>(() => {
     const base: KeyHint[] = [["↑↓", "move"], ["/", "search"], ["n", "new"]];
+    if (group) base.push(["esc", query ? "clear" : "all secrets"]);
     if (!entry) return base;
     return [...base, ["c", entry.type === "otp" ? "copy code" : "copy"], ["s", "reveal"], ["e", "edit"], ["d", "delete"], ["L", "link"]];
-  }, [entry]);
+  }, [entry, group, query]);
 
   useScreen(commands, hints);
 
@@ -271,7 +278,19 @@ export function VaultScreen() {
   return (
     <div className="grid h-full min-h-0 grid-cols-1 gap-3 md:grid-cols-[minmax(16rem,22rem)_1fr] sm:gap-4">
       <Panel
-        title={secrets ? `Secrets · ${query ? `${filtered.length}/${secrets.length}` : secrets.length}` : "Secrets"}
+        title={
+          group ? (
+            <span className="flex items-center gap-1.5">
+              <span className="normal-case tracking-normal text-accent">{group.name}</span>
+              <span>· {scoped ? (query ? `${filtered.length}/${scoped.length}` : scoped.length) : ""}</span>
+              <Tooltip content="Show all secrets (esc)">
+                <button type="button" onClick={() => openGroup(null)} aria-label="Show all secrets" className="cursor-pointer rounded p-0.5 text-dim hover:bg-selection hover:text-text">
+                  <X className="size-3.5" />
+                </button>
+              </Tooltip>
+            </span>
+          ) : secrets ? `Secrets · ${query ? `${filtered.length}/${secrets.length}` : secrets.length}` : "Secrets"
+        }
         actions={
           <>
             <Tooltip content="Reload (r)">
@@ -317,6 +336,10 @@ export function VaultScreen() {
             <Empty icon={<KeyRound />} title="Your vault is empty">
               Press <Kbd>n</Kbd> to add your first secret.
             </Empty>
+          ) : group && scoped?.length === 0 ? (
+            <Empty icon={<KeyRound />} title={`No secrets in ${group.name}`}>
+              Press <Kbd>n</Kbd> to add one, or <Kbd>esc</Kbd> to show all secrets.
+            </Empty>
           ) : filtered.length === 0 ? (
             <Empty icon={<Search />} title="No matches">Nothing matches “{query}”.</Empty>
           ) : (
@@ -360,6 +383,7 @@ export function VaultScreen() {
           <SecretForm
             secret={dialog.kind === "edit" ? dialog.secret : null}
             existingNames={(secrets ?? []).map((s) => s.name)}
+            defaultGroupId={group?.id ?? null}
             onDone={(saved) => {
               setDialog(null);
               void afterChange(saved.id);
@@ -519,6 +543,12 @@ function SecretPane(props: {
         {secret.description ? (
           <Row label={secret.type === "password" ? "Notes" : "Description"}>
             <p className="whitespace-pre-wrap break-words text-sm text-text/90">{secret.description}</p>
+          </Row>
+        ) : null}
+
+        {secret.group ? (
+          <Row label="Group">
+            <span className="text-sm text-text">{secret.group}</span>
           </Row>
         ) : null}
 

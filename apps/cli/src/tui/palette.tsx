@@ -6,6 +6,9 @@ import type { Command } from "./context.tsx";
 import { theme } from "./theme.ts";
 import { fuzzyFilter, isEnter, truncate } from "./util.ts";
 
+// The row reads "group · title", so a query can span both, e.g. "group homelab".
+const fields = (c: Command) => [c.title, c.group, c.hint, `${c.group} ${c.title}`];
+
 /** Ctrl+K overlay: fuzzy search over the current screen's commands plus global ones. */
 export function CommandPalette({ commands, onClose }: { commands: Command[]; onClose: () => void }) {
   const { width, height } = useTerminalDimensions();
@@ -15,7 +18,7 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
   const latestQuery = useRef("");
 
   const results = useMemo(
-    () => fuzzyFilter(commands, query, (c) => [c.title, c.group, c.hint]),
+    () => fuzzyFilter(commands, query, fields),
     [commands, query],
   );
   const current = Math.min(index, Math.max(0, results.length - 1));
@@ -34,7 +37,7 @@ export function CommandPalette({ commands, onClose }: { commands: Command[]; onC
     if (key.name === "pagedown") { key.preventDefault(); setIndex(Math.min(results.length - 1, current + 10)); return; }
     if (isEnter(key)) {
       key.preventDefault();
-      const fresh = latestQuery.current === query ? results : fuzzyFilter(commands, latestQuery.current, (c) => [c.title, c.group, c.hint]);
+      const fresh = latestQuery.current === query ? results : fuzzyFilter(commands, latestQuery.current, fields);
       run(fresh[latestQuery.current === query ? current : 0]);
     }
   });

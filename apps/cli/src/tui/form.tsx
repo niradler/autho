@@ -1,21 +1,23 @@
 import { useKeyboard } from "@opentui/react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { booleanPreference, numberPreference, type SecretRecord, type SecretType, type VaultSession } from "../../../../packages/core/src/index.ts";
+import { booleanPreference, numberPreference, type GroupSummary, type SecretRecord, type SecretType, type VaultSession } from "../../../../packages/core/src/index.ts";
 import { Button, SecretInput, TextField, type KeyHint } from "./components.tsx";
-import { useApp, useScreenContext, type Command } from "./context.tsx";
+import { useApp, useScreenContext, type Command, type GroupFilter } from "./context.tsx";
+import { GroupPicker } from "./groups.tsx";
 import { theme, typeBadge, typeLabel } from "./theme.ts";
 import { generatePassword, isEnter } from "./util.ts";
 
-type FieldKey = "type" | "name" | "value" | "username" | "url" | "description";
+type FieldKey = "type" | "name" | "group" | "value" | "username" | "url" | "description";
+type TextKey = Exclude<FieldKey, "type" | "group">;
 
 const TYPES: SecretType[] = ["password", "note", "otp"];
 
 function fieldsFor(type: SecretType): FieldKey[] {
   switch (type) {
-    case "password": return ["type", "name", "value", "username", "url", "description"];
-    case "otp": return ["type", "name", "value", "username", "description"];
-    case "note": return ["type", "name", "value", "description"];
+    case "password": return ["type", "name", "group", "value", "username", "url", "description"];
+    case "otp": return ["type", "name", "group", "value", "username", "description"];
+    case "note": return ["type", "name", "group", "value", "description"];
   }
 }
 
@@ -26,6 +28,7 @@ function valueLabel(type: SecretType): string {
 const LABELS: Record<FieldKey, string> = {
   type: "Type",
   name: "Name",
+  group: "Group",
   value: "Password",
   username: "Username",
   url: "URL",
@@ -37,10 +40,12 @@ const LABELS: Record<FieldKey, string> = {
  * loaded when the user asks for it with Ctrl+R; leaving the value field
  * empty keeps it unchanged.
  */
-export function SecretForm({ session, editing, onDone, onCancel, setHints, revealMs }: {
+export function SecretForm({ session, editing, defaultGroup, onDone, onCancel, setHints, revealMs }: {
   session: VaultSession;
   /** Existing secret (without needing its value) when editing; null to create. */
   editing: SecretRecord | null;
+  /** Group a new secret starts in, e.g. the one the vault list is narrowed to. */
+  defaultGroup?: GroupFilter;
   onDone: (message: string, id?: string) => void;
   onCancel: () => void;
   setHints: (hints: KeyHint[]) => void;
@@ -49,13 +54,23 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
 }) {
   const app = useApp();
   const [type, setType] = useState<SecretType>(editing?.type ?? "password");
-  const [values, setValues] = useState<Record<Exclude<FieldKey, "type">, string>>(() => ({
+  const [values, setValues] = useState<Record<TextKey, string>>(() => ({
     name: editing?.name ?? "",
     value: "",
     username: editing?.username ?? "",
     url: typeof editing?.metadata.url === "string" ? editing.metadata.url : "",
     description: typeof editing?.metadata.description === "string" ? editing.metadata.description : "",
   }));
+  const groups = useMemo<GroupSummary[]>(() => {
+    try {
+      return session.listGroups();
+    } catch {
+      return [];
+    }
+  }, [session]);
+  const [groupId, setGroupId] = useState<string | null>(() => (editing ? editing.groupId : defaultGroup?.id ?? null));
+  const [pickingGroup, setPickingGroup] = useState(false);
+  const groupName = groups.find((g) => g.id === groupId)?.name ?? null;
   const fields = useMemo(() => fieldsFor(type).filter((f) => !(editing && f === "type")), [type, editing]);
   const [focus, setFocus] = useState<FieldKey>(editing ? "name" : "type");
   const [error, setError] = useState("");
@@ -66,7 +81,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
   const currentValue = useRef(values.value);
   currentValue.current = values.value;
 
-  const set = (key: Exclude<FieldKey, "type">) => (v: string) => setValues((prev) => ({ ...prev, [key]: v }));
+  const set = (key: TextKey) => (v: string) => setValues((prev) => ({ ...prev, [key]: v }));
 
   const save = () => {
     const name = values.name.trim();
@@ -81,6 +96,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
         if (name !== editing.name) updates.name = name;
         if (values.value && values.value !== loadedValue.current) updates.value = values.value;
         if (type !== "note" && values.username !== (editing.username ?? "")) updates.username = values.username;
+        if (groupId !== editing.groupId) updates.group = groupId;
         const oldUrl = typeof editing.metadata.url === "string" ? editing.metadata.url : "";
         const oldDesc = typeof editing.metadata.description === "string" ? editing.metadata.description : "";
         if ((metadata.url ?? "") !== oldUrl || (metadata.description ?? "") !== oldDesc) {
@@ -92,6 +108,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
         onDone(`Saved "${name}"`, editing.id);
       } else {
         const created = session.addSecret({
+          group: groupId ?? undefined,
           metadata,
           name,
           type,
@@ -160,7 +177,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
   };
 
   useKeyboard((key) => {
-    if (!app.active) return;
+    if (!app.active || pickingGroup) return;
     if (key.name === "escape") { key.preventDefault(); onCancel(); return; }
     if (key.ctrl && key.name === "s") { key.preventDefault(); save(); return; }
     if (key.ctrl && key.name === "g") { key.preventDefault(); generate(); return; }
@@ -174,6 +191,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
       else if (key.name === "right" || key.name === "space") cycleType(1);
       else if (isEnter(key)) moveFocus(1);
     }
+    if (focus === "group" && (isEnter(key) || key.name === "space")) { key.preventDefault(); setPickingGroup(true); }
   });
 
   // Enter on the last field saves; on others it moves on.
@@ -192,6 +210,7 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
   useEffect(() => {
     const hints: KeyHint[] = [["tab/↑↓", "field"], ["enter", "next"], ["ctrl+s", "save"]];
     if (focus === "type") hints.splice(1, 0, ["←→", "type"]);
+    if (focus === "group") hints.splice(1, 1, ["enter", "choose group"]);
     hints.push(["ctrl+r", showValue ? "hide" : "show"]);
     if (type === "password") hints.push(["ctrl+g", "generate"]);
     hints.push(["esc", "cancel"]);
@@ -222,6 +241,13 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
                     </box>
                   );
                 })}
+              </box>
+            ));
+          }
+          if (key === "group") {
+            return row("group", (
+              <box flexDirection="row" flexGrow={1} paddingX={1} backgroundColor={focus === "group" && active ? theme.inputFocus : theme.input} onMouseDown={() => { setFocus("group"); setPickingGroup(true); }}>
+                <text fg={groupName ? theme.text : theme.dim}>{groupName ?? (groups.length ? "none — enter to choose" : "none — create groups in the Groups tab")}</text>
               </box>
             ));
           }
@@ -265,6 +291,14 @@ export function SecretForm({ session, editing, onDone, onCancel, setHints, revea
           <Button hotkey="esc" label="cancel" onPress={onCancel} color={theme.muted} />
         </box>
       </box>
+      {pickingGroup ? (
+        <GroupPicker
+          groups={groups}
+          currentId={groupId}
+          onPick={(group) => { setGroupId(group?.id ?? null); setPickingGroup(false); moveFocus(1); }}
+          onClose={() => setPickingGroup(false)}
+        />
+      ) : null}
     </box>
   );
 }

@@ -35,6 +35,8 @@ export type VaultPasskey = {
 
 export type SecretRow = {
   createdAt: string;
+  /** The group the secret is filed under; null when ungrouped. */
+  groupId: string | null;
   id: string;
   name: string;
   payload: string;
@@ -53,6 +55,15 @@ export type LeaseRow = {
   revokedAt: string | null;
   secretRefs: string;
 };
+
+export type GroupRow = {
+  createdAt: string;
+  id: string;
+  name: string;
+  updatedAt: string;
+};
+
+export type GroupWithCount = GroupRow & { secretCount: number };
 
 export type LinkRow = {
   createdAt: string;
@@ -74,10 +85,11 @@ export type SealRow = {
  * column later doesn't silently change what an existing seal signed.
  */
 const PROTECTED_COLUMNS = {
+  groups: ["id", "name", "created_at", "updated_at"],
   leases: ["id", "name", "secret_refs", "expires_at", "revoked_at", "created_at", "include_links"],
   meta: ["key", "value"],
   secret_links: ["primary_id", "linked_id", "created_at"],
-  secrets: ["id", "name", "type", "payload", "wrapped_key", "created_at", "updated_at"],
+  secrets: ["id", "name", "type", "payload", "wrapped_key", "created_at", "updated_at", "group_id"],
 } as const;
 
 type ProtectedTable = keyof typeof PROTECTED_COLUMNS;
@@ -242,6 +254,13 @@ export class AuthoDatabase {
       );
       CREATE INDEX IF NOT EXISTS secret_links_linked ON secret_links (linked_id);
 
+      CREATE TABLE IF NOT EXISTS groups (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS seal_rows (
         table_name TEXT NOT NULL,
         row_id TEXT NOT NULL,
@@ -250,6 +269,11 @@ export class AuthoDatabase {
       );
     `);
 
+    const secretColumns = this.db.query("PRAGMA table_info(secrets)").all() as { name: string }[];
+    if (!secretColumns.some((column) => column.name === "group_id")) {
+      this.db.exec("ALTER TABLE secrets ADD COLUMN group_id TEXT");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS secrets_group_id ON secrets (group_id)");
     const leaseColumns = this.db.query("PRAGMA table_info(leases)").all() as { name: string }[];
     if (!leaseColumns.some((column) => column.name === "include_links")) {
       this.db.exec("ALTER TABLE leases ADD COLUMN include_links INTEGER NOT NULL DEFAULT 1");
@@ -319,8 +343,8 @@ export class AuthoDatabase {
   insertSecret(secret: SecretRow): void {
     this.db
       .query(
-        `INSERT INTO secrets (id, name, type, payload, wrapped_key, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+        `INSERT INTO secrets (id, name, type, payload, wrapped_key, created_at, updated_at, group_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`,
       )
       .run(
         secret.id,
@@ -330,6 +354,7 @@ export class AuthoDatabase {
         secret.wrappedKey,
         secret.createdAt,
         secret.updatedAt,
+        secret.groupId,
       );
   }
 
@@ -343,7 +368,8 @@ export class AuthoDatabase {
            payload,
            wrapped_key AS wrappedKey,
            created_at AS createdAt,
-           updated_at AS updatedAt
+           updated_at AS updatedAt,
+           group_id AS groupId
          FROM secrets
          ORDER BY created_at ASC`,
       )
@@ -360,7 +386,8 @@ export class AuthoDatabase {
            payload,
            wrapped_key AS wrappedKey,
            created_at AS createdAt,
-           updated_at AS updatedAt
+           updated_at AS updatedAt,
+           group_id AS groupId
          FROM secrets
          WHERE id = ?1 OR name = ?1
          LIMIT 1`,
@@ -370,9 +397,12 @@ export class AuthoDatabase {
     return row ?? null;
   }
 
-  updateSecret(id: string, updates: { name?: string; payload?: string; type?: string; updatedAt: string }): void {
+  updateSecret(
+    id: string,
+    updates: { groupId?: string | null; name?: string; payload?: string; type?: string; updatedAt: string },
+  ): void {
     const parts: string[] = [];
-    const values: string[] = [];
+    const values: (string | null)[] = [];
     let idx = 1;
 
     if (updates.name !== undefined) {
@@ -390,6 +420,11 @@ export class AuthoDatabase {
       values.push(updates.payload);
       idx++;
     }
+    if (updates.groupId !== undefined) {
+      parts.push(`group_id = ?${idx}`);
+      values.push(updates.groupId);
+      idx++;
+    }
     parts.push(`updated_at = ?${idx}`);
     values.push(updates.updatedAt);
     idx++;
@@ -402,6 +437,47 @@ export class AuthoDatabase {
   deleteSecret(id: string): void {
     this.db.query("DELETE FROM secret_links WHERE primary_id = ?1 OR linked_id = ?1").run(id);
     this.db.query("DELETE FROM secrets WHERE id = ?1").run(id);
+  }
+
+  insertGroup(group: GroupRow): void {
+    this.db
+      .query("INSERT INTO groups (id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)")
+      .run(group.id, group.name, group.createdAt, group.updatedAt);
+  }
+
+  /** By id, or by name ignoring case. */
+  findGroup(ref: string): GroupRow | null {
+    const row = this.db
+      .query(
+        `SELECT id, name, created_at AS createdAt, updated_at AS updatedAt
+         FROM groups WHERE id = ?1 OR name = ?1 COLLATE NOCASE LIMIT 1`,
+      )
+      .get(ref) as GroupRow | null;
+    return row ?? null;
+  }
+
+  /** Every group with how many secrets it holds, by name. */
+  listGroups(): GroupWithCount[] {
+    return this.db
+      .query(
+        `SELECT g.id, g.name, g.created_at AS createdAt, g.updated_at AS updatedAt,
+           (SELECT COUNT(*) FROM secrets s WHERE s.group_id = g.id) AS secretCount
+         FROM groups g ORDER BY g.name COLLATE NOCASE ASC`,
+      )
+      .all() as GroupWithCount[];
+  }
+
+  renameGroup(id: string, name: string, updatedAt: string): void {
+    this.db.query("UPDATE groups SET name = ?2, updated_at = ?3 WHERE id = ?1").run(id, name, updatedAt);
+  }
+
+  /** Deletes a group and ungroups its secrets (never deletes them). Returns how many were ungrouped. */
+  deleteGroup(id: string, updatedAt: string): number {
+    const ungrouped = this.db
+      .query("UPDATE secrets SET group_id = NULL, updated_at = ?2 WHERE group_id = ?1")
+      .run(id, updatedAt).changes;
+    this.db.query("DELETE FROM groups WHERE id = ?1").run(id);
+    return ungrouped;
   }
 
   insertLink(link: LinkRow): void {
@@ -523,13 +599,20 @@ export class AuthoDatabase {
   /** Every row the vault seal covers, with the columns in PROTECTED_COLUMNS. */
   listProtectedRows(): ProtectedRow[] {
     const select = (table: ProtectedTable) => `SELECT ${PROTECTED_COLUMNS[table].join(", ")} FROM ${table}`;
-    const secrets = this.db.query(select("secrets")).all() as Record<string, unknown>[];
+    // A null group_id is left out, so secrets sealed before groups existed keep their signature.
+    const secrets = (this.db.query(select("secrets")).all() as Record<string, unknown>[]).map((row) => {
+      if (row.group_id !== null) return row;
+      const { group_id: _ungrouped, ...rest } = row;
+      return rest;
+    });
+    const groups = this.db.query(select("groups")).all() as Record<string, unknown>[];
     const links = this.db.query(select("secret_links")).all() as Record<string, unknown>[];
     const leases = this.db.query(select("leases")).all() as Record<string, unknown>[];
     const meta = this.db.query(`${select("meta")} WHERE key != ?1`).all(SEAL_META_KEY) as Record<string, unknown>[];
 
     return [
       ...secrets.map((row) => ({ row, rowId: String(row.id), tableName: "secrets" })),
+      ...groups.map((row) => ({ row, rowId: String(row.id), tableName: "groups" })),
       ...links.map((row) => ({ row, rowId: `${row.primary_id}>${row.linked_id}`, tableName: "secret_links" })),
       ...leases.map((row) => ({ row, rowId: String(row.id), tableName: "leases" })),
       ...meta.map((row) => ({ row, rowId: String(row.key), tableName: "meta" })),

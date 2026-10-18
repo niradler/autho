@@ -1,13 +1,15 @@
 import { Command as CommandIcon, Lock } from "lucide-react";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "./components/ui/button.tsx";
 import { Kbd } from "./components/ui/panel.tsx";
 import { Tooltip } from "./components/ui/tooltip.tsx";
 import { useApp, type Command, type Screen } from "./context.tsx";
+import { UNGROUPED_LABEL, api, type Group } from "./lib/api.ts";
 import { cn, isMac, isTypingTarget } from "./lib/utils.ts";
 import { Palette } from "./palette.tsx";
 import { AuditScreen } from "./screens/audit.tsx";
+import { GroupsScreen } from "./screens/groups.tsx";
 import { HealthScreen } from "./screens/health.tsx";
 import { LeasesScreen } from "./screens/leases.tsx";
 import { SettingsScreen } from "./screens/settings.tsx";
@@ -16,9 +18,10 @@ import { VaultScreen } from "./screens/vault.tsx";
 
 const NAV: { screen: Screen; label: string; key: string }[] = [
   { screen: "vault", label: "Vault", key: "1" },
-  { screen: "leases", label: "Leases", key: "2" },
-  { screen: "audit", label: "Audit", key: "3" },
-  { screen: "health", label: "Integrity", key: "4" },
+  { screen: "groups", label: "Groups", key: "2" },
+  { screen: "leases", label: "Leases", key: "3" },
+  { screen: "audit", label: "Audit", key: "4" },
+  { screen: "health", label: "Integrity", key: "5" },
   { screen: "settings", label: "Settings", key: "," },
 ];
 
@@ -56,10 +59,31 @@ export function Shell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [app]);
 
+  // Group rows are fetched each time the palette opens, so counts are current.
+  const [groupRows, setGroupRows] = useState<{ groups: Group[]; ungrouped: number } | null>(null);
+  useEffect(() => {
+    if (!app.paletteOpen) return;
+    let cancelled = false;
+    void Promise.all([api.groups(), api.secrets()])
+      .then(([groups, secrets]) => {
+        if (!cancelled) setGroupRows({ groups, ungrouped: secrets.filter((s) => s.groupId === null).length });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [app.paletteOpen]);
+
   const globalCommands = useMemo<Command[]>(() => [
+    ...(groupRows?.groups ?? []).map((g) => ({
+      id: `group:${g.id}`, title: g.name, group: "Group", hint: String(g.secretCount), keywords: "group", run: () => app.openGroup({ id: g.id, name: g.name }),
+    })),
+    ...(groupRows
+      ? [{ id: "group:ungrouped", title: UNGROUPED_LABEL, group: "Group", hint: String(groupRows.ungrouped), keywords: "group", run: () => app.openGroup({ id: null, name: UNGROUPED_LABEL }) }]
+      : []),
     ...NAV.map((n) => ({ id: `go:${n.screen}`, title: `Go to ${n.label}`, group: "Navigate", hint: n.key, run: () => app.go(n.screen) })),
     { id: "lock", title: "Lock vault", group: "App", hint: `${mod}+l`, run: () => app.lock() },
-  ], [app, mod]);
+  ], [app, mod, groupRows]);
 
   const title = NAV.find((n) => n.screen === app.screen)?.label ?? "";
 
@@ -107,6 +131,7 @@ export function Shell() {
 
       <main className="min-h-0 flex-1 overflow-hidden p-3 sm:p-4">
         {app.screen === "vault" ? <VaultScreen /> : null}
+        {app.screen === "groups" ? <GroupsScreen /> : null}
         {app.screen === "leases" ? <LeasesScreen /> : null}
         {app.screen === "audit" ? <AuditScreen /> : null}
         {app.screen === "health" ? <HealthScreen /> : null}

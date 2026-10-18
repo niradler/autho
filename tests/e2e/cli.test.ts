@@ -815,6 +815,31 @@ describe("autho rewrite CLI", () => {
       expect(indexed.data.find((s) => s.name === "github")!.linkCount).toBe(1);
       expect((await changeLink("DELETE")).status).toBe(200);
 
+      // Groups: create, assign, filter the list, rename, ungroup, delete. Same session and CSRF checks.
+      expect((await api("/api/groups", { cookie: auth.cookie, body: { name: "homelab" } })).status).toBe(401);
+      const createdGroup = await api("/api/groups", { ...auth, body: { name: "homelab" } });
+      expect(createdGroup.status).toBe(201);
+      const groupId = ((await createdGroup.json()) as { data: { id: string } }).data.id;
+      expect((await api("/api/groups", { ...auth, body: { name: "HomeLab" } })).status).toBe(400);
+      expect((await api("/api/secrets/memo", { ...auth, body: { group: "nope" }, method: "PATCH" })).status).toBe(404);
+      expect((await api("/api/secrets/memo", { ...auth, body: { group: 7 }, method: "PATCH" })).status).toBe(400);
+      expect((await api("/api/secrets/memo", { ...auth, body: { group: "homelab" }, method: "PATCH" })).status).toBe(200);
+      const names = async (query: string) =>
+        ((await (await api(`/api/secrets${query}`, auth)).json()) as { data: Array<{ name: string }> }).data.map((s) => s.name);
+      expect(await names("?group=HOMELAB")).toEqual(["memo"]);
+      expect(await names(`?group=${encodeURIComponent("(ungrouped)")}`)).toEqual(["github"]);
+      expect((await api("/api/secrets?group=missing", auth)).status).toBe(404);
+      expect((await api(`/api/groups/${groupId}`, { ...auth, body: { name: "lab" }, method: "PATCH" })).status).toBe(200);
+      const memoDetail = (await (await api("/api/secrets/memo", auth)).json()) as { data: { group: string } };
+      expect(memoDetail.data.group).toBe("lab");
+      const groupList = (await (await api("/api/groups", auth)).json()) as { data: Array<{ name: string; secretCount: number }> };
+      expect(groupList.data.map((g) => [g.name, g.secretCount])).toEqual([["lab", 1]]);
+      expect((await api("/api/secrets/memo", { ...auth, body: { group: null }, method: "PATCH" })).status).toBe(200);
+      expect(await names("?group=lab")).toEqual([]);
+      const deletedGroup = await api(`/api/groups/${groupId}`, { ...auth, method: "DELETE" });
+      expect(((await deletedGroup.json()) as { data: { ungrouped: number } }).data.ungrouped).toBe(0);
+      expect((await names("")).sort()).toEqual(["github", "memo"]);
+
       // Security changes need a fresh identity check on top of the session.
       expect((await api("/api/admin/password", { ...auth, body: { newPassword: "another long password" } })).status).toBe(403);
       expect((await api("/api/settings/vault-dir", { ...auth, body: { path: tempRoot }, method: "PUT" })).status).toBe(403);
@@ -1489,5 +1514,61 @@ describe("autho config and custom AUTHO_HOME", () => {
     expect(runCliJson(["unlink", "github", "github-otp", ...auth], env)).toBeTruthy();
     const removed = runCliJson(["secrets", "rm", "--ref", "github", "--with-linked", ...auth], env) as { removedLinked: unknown[] };
     expect(removed.removedLinked).toEqual([]);
+  });
+
+  test("groups: create, assign, filter, rename, ungroup and delete from the CLI", () => {
+    const customHome = mkdtempSync(join(tmpdir(), "autho-groups-"));
+    const vaultPath = join(customHome, "vault.db");
+    const password = "correct horse battery staple";
+    const env = { AUTHO_HOME: customHome };
+    const auth = ["--vault", vaultPath, "--password", password];
+    expect(runCli(["init", ...auth], env).exitCode).toBe(0);
+
+    const created = runCliJson(["groups", "create", "homelab", ...auth], env) as { id: string; name: string };
+    expect(created.name).toBe("homelab");
+    expect(runCli(["groups", "create", "HomeLab", ...auth], env).exitCode).not.toBe(0);
+
+    runCliJson(["secrets", "add", ...auth, "--name", "proxmox", "--type", "password", "--value", "pw", "--group", "homelab"], env);
+    runCliJson(["secrets", "add", ...auth, "--name", "nas", "--type", "password", "--value", "pw", "--group", "HOMELAB"], env);
+    runCliJson(["secrets", "add", ...auth, "--name", "aws", "--type", "password", "--value", "pw"], env);
+    const typo = runCli(["secrets", "add", ...auth, "--name", "x", "--type", "note", "--value", "x", "--group", "homleab"], env);
+    expect(typo.exitCode).not.toBe(0);
+    expect(typo.stderr).toContain("Group not found");
+
+    const inGroup = runCliJson(["secrets", "list", "--group", "homelab", ...auth], env) as { name: string; group: string }[];
+    expect(inGroup.map((s) => s.name).sort()).toEqual(["nas", "proxmox"]);
+    expect(inGroup.every((s) => s.group === "homelab")).toBe(true);
+
+    const renamed = runCliJson(["groups", "rename", "homelab", "lab", ...auth], env) as { name: string; secretCount: number };
+    expect(renamed).toMatchObject({ name: "lab", secretCount: 2 });
+
+    const edited = runCliJson(["secrets", "edit", "--ref", "nas", "--no-group", ...auth], env) as { group: string | null };
+    expect(edited.group).toBeNull();
+    expect(runCli(["secrets", "edit", "--ref", "nas", "--group", "lab", "--no-group", ...auth], env).exitCode).not.toBe(0);
+
+    const listed = runCliJson(["groups", "list", ...auth], env) as { name: string; secretCount: number }[];
+    expect(listed.map((g) => [g.name, g.secretCount])).toEqual([["lab", 1]]);
+
+    const unconfirmed = runCli(["groups", "rm", "lab", ...auth], env);
+    expect(unconfirmed.exitCode).not.toBe(0);
+    expect(unconfirmed.stderr).toContain("--yes");
+    const removed = runCliJson(["groups", "rm", "lab", "--yes", ...auth], env) as { ungrouped: number };
+    expect(removed.ungrouped).toBe(1);
+    const secrets = runCliJson(["secrets", "list", ...auth], env) as { name: string; group: string | null }[];
+    expect(secrets.map((s) => [s.name, s.group]).sort()).toEqual([["aws", null], ["nas", null], ["proxmox", null]]);
+
+    const audit = runCliJson(["audit", "list", "--limit", "50", ...auth], env) as { eventType: string }[];
+    const types = audit.map((e) => e.eventType);
+    for (const type of ["group.created", "group.renamed", "group.deleted", "secret.grouped"]) {
+      expect(types).toContain(type);
+    }
+
+    // A group planted directly in SQLite is reported as tampered.
+    const db = new Database(vaultPath);
+    db.query("INSERT INTO groups (id, name, created_at, updated_at) VALUES ('g1', 'planted', 'x', 'x')").run();
+    db.close();
+    const verify = runCli(["vault", "verify", ...auth], env);
+    expect(verify.exitCode).toBe(2);
+    expect(verify.stdout).toContain("groups");
   });
 });

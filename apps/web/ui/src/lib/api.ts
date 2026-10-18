@@ -17,7 +17,15 @@ export type SecretEntry = {
   url: string | null;
   description: string | null;
   linkCount: number;
+  /** The group it belongs to, if any (one group per secret). */
+  group: string | null;
+  groupId: string | null;
 };
+
+export type Group = { id: string; name: string; createdAt: string; updatedAt: string; secretCount: number };
+
+/** Names the list's "no group" row; it isn't a real group. */
+export const UNGROUPED_LABEL = "(ungrouped)";
 
 export type LinkedSecret = { id: string; name: string; type: SecretType };
 export type SecretDetail = SecretEntry & { links: LinkedSecret[]; linkedFrom: LinkedSecret[] };
@@ -209,6 +217,11 @@ export const api = {
     ),
   reveal: (id: string) => request<{ value: string }>("POST", `/api/secrets/${encodeURIComponent(id)}/reveal`),
   otp: (id: string, copy = false) => request<{ code: string; expiresAt: string }>("GET", `/api/secrets/${encodeURIComponent(id)}/otp${copy ? "?copy=1" : ""}`),
+  groups: () => request<Group[]>("GET", "/api/groups"),
+  createGroup: (name: string) => request<Group>("POST", "/api/groups", { name }),
+  renameGroup: (id: string, name: string) => request<Group>("PATCH", `/api/groups/${encodeURIComponent(id)}`, { name }),
+  deleteGroup: (id: string) => request<{ id: string; name: string; ungrouped: number }>("DELETE", `/api/groups/${encodeURIComponent(id)}`),
+
   link: (primary: string, secret: string) => request<{ created: boolean }>("POST", "/api/links", { primary, secret }),
   unlink: (primary: string, secret: string) => request<unknown>("DELETE", "/api/links", { primary, secret }),
 
