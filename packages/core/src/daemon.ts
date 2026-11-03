@@ -222,12 +222,27 @@ type DaemonClientOptions = {
 
 export async function startDaemonServer(options: ServeOptions): Promise<void> {
   if (!["127.0.0.1", "localhost", "::1"].includes(options.host)) throw new Error("Daemon must bind to loopback");
+  const existing = readDaemonState(options.statePath);
+  if (existing && Number.isSafeInteger(existing.pid) && existing.pid > 0) {
+    let running = true;
+    try { process.kill(existing.pid, 0); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") running = false;
+    }
+    if (running) throw new Error("A daemon already owns this state file; stop it before starting another");
+  }
   const sessions = new Map<string, DaemonSession>();
   const leaseKeys = new LeaseKeyRegistry();
   const keyring = new LeaseKeyring(options.statePath);
   await keyring.cleanup(true);
   const startedAt = new Date().toISOString();
   const token = randomId(24);
+  let published = false;
+  const ownsState = (): boolean => {
+    try {
+      const state = readDaemonState(options.statePath);
+      return state?.pid === process.pid && state.startedAt === startedAt;
+    } catch { return false; }
+  };
 
   const cleanupExpiredSessions = (): void => {
     const now = Date.now();
@@ -245,7 +260,16 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
   let issuing = false;
   let requestWindow = Date.now();
   let leaseRequests = 0;
+  const pendingKeyCleanup = new Set<string>();
+  const expireLeaseKeys = (): void => {
+    for (const grant of leaseKeys.list()) {
+      if (!leaseKeys.expired(grant)) continue;
+      leaseKeys.revoke(grant.leaseId);
+      pendingKeyCleanup.add(grant.leaseId);
+    }
+  };
   const sweepLeaseKeys = async (): Promise<void> => {
+    expireLeaseKeys();
     if (sweeping) return;
     sweeping = true;
     try {
@@ -256,19 +280,29 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
             const lease = db.findLease(grant.leaseId);
             if (!lease || lease.revokedAt || leaseKeys.expired(grant) || Date.parse(lease.expiresAt) <= Date.now()) {
               leaseKeys.revoke(grant.leaseId);
-              await keyring.forget(grant.leaseId).catch(() => undefined);
+              pendingKeyCleanup.add(grant.leaseId);
             }
           }
         } finally {
           db.close();
         }
       }
-      await keyring.cleanup();
     } finally {
-      sweeping = false;
+      try {
+        for (const leaseId of pendingKeyCleanup) {
+          try {
+            await keyring.forget(leaseId);
+            pendingKeyCleanup.delete(leaseId);
+          } catch { /* Keep the cleanup obligation for the next sweep. */ }
+        }
+        await keyring.cleanup();
+      } finally {
+        sweeping = false;
+      }
     }
   };
   const sweepTimer = setInterval(() => {
+    if (published && !ownsState()) { shutdown(); return; }
     cleanupExpiredSessions();
     void sweepLeaseKeys().catch(() => undefined);
   }, 1000);
@@ -280,8 +314,17 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
     leaseKeys.clear();
     for (const session of sessions.values()) session.rootKey.fill(0);
     sessions.clear();
-    void keyring.cleanup(true).catch(() => undefined).then(() => deleteDaemonState(options.statePath)).finally(async () => {
+    const drainDeadline = setTimeout(() => {
+      void server?.stop(true);
+      process.exit(0);
+    }, 5000);
+    void (async () => {
+      if (!ownsState()) return;
+      await keyring.cleanup(true).catch(() => undefined);
+      if (ownsState()) await deleteDaemonState(options.statePath);
+    })().finally(async () => {
       await server?.stop(false);
+      clearTimeout(drainDeadline);
       process.exit(0);
     });
   };
@@ -300,6 +343,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
       cleanupExpiredSessions();
 
       const url = new URL(request.url);
+      if (!published || !ownsState()) return json({ error: "Daemon does not own its state file" }, 503);
       if (stopping) return json({ error: "Daemon is stopping" }, 503);
       const hosts = new Set([`127.0.0.1:${server?.port}`, `localhost:${server?.port}`, `[::1]:${server?.port}`]);
       if (!hosts.has(request.headers.get("host") ?? "")) return json({ error: "Invalid daemon host" }, 421);
@@ -343,11 +387,13 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
           let issuedLeaseId: string | undefined;
           try {
             const input = parseLeaseIssue(await request.json());
+            if (stopping || !ownsState()) throw new Error("Daemon is stopping");
             vaultSession = VaultService.unlock(options.vaultPath, {
               ...input.credentials,
               sealRecord: await loadSealRecord(options.vaultPath),
               source: "daemon",
             }, { recordUnlock: false });
+            if (stopping || !ownsState()) throw new Error("Daemon is stopping");
             let leaseId = input.leaseId;
             if (!leaseId) {
               const lease = vaultSession.createLease({
@@ -357,9 +403,11 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
               createdLeaseId = lease.id;
             }
             await keyring.forget(leaseId);
+            if (stopping || !ownsState()) throw new Error("Daemon is stopping");
             const issued = leaseKeys.issue(vaultSession, leaseId, options.vaultPath);
             issuedLeaseId = leaseId;
             if (input.remember) await keyring.save(leaseId, issued.lease.expiresAt, issued.leaseKey);
+            if (stopping || !ownsState()) throw new Error("Daemon is stopping");
             return json({ ...issued.lease, keyStored: input.remember, leaseKey: input.remember ? undefined : issued.leaseKey });
           } catch (error) {
             if (issuedLeaseId) {
@@ -387,7 +435,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
             sealRecord: await loadSealRecord(grant.vaultPath),
             source: "daemon",
           });
-          if (leaseKeys.expired(grant) || leaseKeys.get(getBearerToken(request)) !== grant) return fail("Invalid or expired lease key", 401);
+          if (stopping || !ownsState() || leaseKeys.expired(grant) || leaseKeys.get(getBearerToken(request)) !== grant) return fail("Invalid or expired lease key", 401);
           if (url.pathname === "/lease/show") {
             leaseObject(body, []);
             return json(vaultSession.inspectLeaseKey(grant));
@@ -531,6 +579,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
     version: 1,
   });
   writeTextFileSecure(`${options.statePath}.endpoint.json`, JSON.stringify({ port: server.port, startedAt }) + "\n");
+  published = true;
 
   const onSignal = (): void => {
     shutdown();

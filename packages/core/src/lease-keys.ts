@@ -6,6 +6,7 @@ import type { LeaseState, VaultSession } from "./index.ts";
 export type LeaseKeyGrant = {
   deadline: number;
   expiresAt: string;
+  invalidated: boolean;
   leaseId: string;
   rootKey: Buffer;
   sealBound: boolean;
@@ -19,7 +20,7 @@ export class LeaseKeyRegistry {
   constructor(private readonly now: () => number = Date.now, private readonly monotonic: () => number = () => performance.now()) {}
 
   issue(session: VaultSession, leaseId: string, vaultPath: string): { lease: LeaseState; leaseKey: string } {
-    if (this.grants.size >= 256) throw new Error("Too many active lease keys");
+    if (this.grants.size >= 256 && !this.list().some((grant) => grant.leaseId === leaseId)) throw new Error("Too many active lease keys");
     const { coverage, lease } = session.approveLeaseKey(leaseId);
     const remaining = Date.parse(lease.expiresAt) - this.now();
     if (!Number.isFinite(remaining) || remaining <= 0) throw new Error("Lease key expired");
@@ -28,6 +29,7 @@ export class LeaseKeyRegistry {
     this.grants.set(this.hash(leaseKey), {
       deadline: this.monotonic() + remaining,
       expiresAt: lease.expiresAt,
+      invalidated: false,
       leaseId,
       rootKey: session.getRootKey(),
       sealBound: session.sealBound,
@@ -46,7 +48,12 @@ export class LeaseKeyRegistry {
   }
 
   expired(grant: LeaseKeyGrant): boolean {
-    return this.now() >= Date.parse(grant.expiresAt) || this.monotonic() >= grant.deadline;
+    if (grant.invalidated || this.now() >= Date.parse(grant.expiresAt) || this.monotonic() >= grant.deadline) {
+      grant.invalidated = true;
+      grant.rootKey.fill(0);
+      return true;
+    }
+    return false;
   }
 
   list(): LeaseKeyGrant[] {

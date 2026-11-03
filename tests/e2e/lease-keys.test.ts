@@ -136,6 +136,33 @@ test("should replace a key through the owner CLI without extending its deadline"
   expect((await request("/lease/show", next.leaseKey)).status).toBe(200);
 });
 
+test("should show help to an agent without using its credential", () => {
+  const response = cli(["--help"], { AUTHO_LEASE_KEY: "invalid-credential" });
+  expect(response.code).toBe(0);
+  expect(response.stdout).toContain("lease-keyring");
+});
+
+test("should check expiry again after a slow request body finishes", async () => {
+  const issued = await issue(1);
+  const bytes = new TextEncoder().encode(JSON.stringify({ mappings: [{ envName: "VALUE", secretRef: "github" }] }));
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes.slice(0, 10));
+      setTimeout(() => {
+        controller.enqueue(bytes.slice(10));
+        controller.close();
+      }, Math.max(0, Date.parse(issued.expiresAt) - Date.now()) + 80);
+    },
+  });
+  const response = await fetch(`http://127.0.0.1:${port}/lease/env`, {
+    method: "POST", body,
+    headers: { authorization: `Bearer ${issued.leaseKey}`, "content-type": "application/json" },
+    signal: AbortSignal.timeout(5000),
+  });
+  expect(response.status).toBe(401);
+  expect((await response.text()).includes("scoped-github-value")).toBe(false);
+});
+
 test("should reject caller-supplied permissions, expiry and session IDs", async () => {
   const issued = await issue();
   for (const field of ["ttlSeconds", "expiresAt", "leaseId", "sessionId", "secretIds", "rootKey", "cmd"]) {

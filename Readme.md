@@ -332,12 +332,16 @@ bun test
 Give an agent a **lease key**, not vault unlock credentials. A lease key authenticates
 only the approved secrets until its deadline. Keep the local daemon running:
 
+In these examples, `GITHUB_SECRET_REF` and `OPENAI_SECRET_REF` are environment
+variables containing your vault entry names or IDs. They are references, never
+the credential values themselves.
+
 ```bash
 # Human: start the daemon in a separate terminal
 autho daemon serve
 
 # Human: approve these exact secrets for 15 minutes using normal vault authentication
-autho lease create --key --name build-agent --secret github --secret openai --ttl 900 --json
+autho lease create --key --name build-agent --secret "$GITHUB_SECRET_REF" --secret "$OPENAI_SECRET_REF" --ttl 900 --json
 
 # Agent: receive the returned leaseKey through a secure environment reference
 # AUTHO_LEASE_KEY is supplied by your launcher, not pasted into shell history
@@ -363,7 +367,7 @@ or can be changed with the CLI. It is off by default and applies to newly issued
 ```bash
 # Human
 autho config set saveLeaseKeys true
-autho lease create --key --secret github --ttl 900 --json
+autho lease create --key --secret "$GITHUB_SECRET_REF" --ttl 900 --json
 # Returns id, expiry and keyStored: true; the key itself is not printed
 
 # Agent: retrieve only this lease's credential from the OS keyring

@@ -91,6 +91,36 @@ test("should bind permission to a secret ID when its name is reused", () => {
   } finally { session.close(); }
 });
 
+test("should replace a key at the registry limit without allowing an extra grant", () => {
+  const { session, vaultPath } = fixture();
+  const registry = new LeaseKeyRegistry();
+  let firstId = "";
+  try {
+    for (let index = 0; index < 256; index += 1) {
+      const lease = session.createLease({ name: `capacity-${index}`, noLinks: true, secretRefs: ["github"], ttlSeconds: 60 });
+      registry.issue(session, lease.id, vaultPath);
+      if (index === 0) firstId = lease.id;
+    }
+    expect(() => registry.issue(session, firstId, vaultPath)).not.toThrow();
+    const extra = session.createLease({ name: "overflow", noLinks: true, secretRefs: ["github"], ttlSeconds: 60 });
+    expect(() => registry.issue(session, extra.id, vaultPath)).toThrow("Too many");
+  } finally { registry.clear(); session.close(); }
+});
+
+test("should never revive a key after observing expiry even if the wall clock goes backwards", () => {
+  const { session, vaultPath } = fixture();
+  let wall = Date.now();
+  const registry = new LeaseKeyRegistry(() => wall, () => 0);
+  try {
+    const lease = session.createLease({ name: "clock", secretRefs: ["github"], ttlSeconds: 60 });
+    const { leaseKey } = registry.issue(session, lease.id, vaultPath);
+    wall = Date.parse(lease.expiresAt);
+    expect(registry.get(leaseKey) === null).toBe(true);
+    wall -= 60_000;
+    expect(registry.get(leaseKey) === null).toBe(true);
+  } finally { registry.clear(); session.close(); }
+});
+
 function keyringFixture() {
   const values = new Map<string, string>();
   let unavailable = false;

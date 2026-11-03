@@ -788,6 +788,10 @@ async function main(): Promise<void> {
     console.log(pkg.version);
     return;
   }
+  if (scope === Scope.Help || scope === Scope.HelpFlag || (!scope && (process.argv.includes("--help") || process.argv.includes("-h")))) {
+    console.log(help());
+    return;
+  }
   const jsonMode = getBoolean(args, "json");
   const vaultPath = getString(args, "vault") ?? defaultVaultPath();
   const statePath = absolutePath(getString(args, "state-file") ?? defaultDaemonStatePath());
@@ -805,12 +809,6 @@ async function main(): Promise<void> {
     password = (await loadVaultPassword(vaultPath)) ?? undefined;
   }
 
-  // `--help` parses as a flag, which leaves scope empty.
-  if (!scope && (process.argv.includes("--help") || process.argv.includes("-h"))) {
-    console.log(help());
-    return;
-  }
-
   if (!scope) {
     // TUI mode when running interactively with no args
     if (process.stdin.isTTY) {
@@ -820,11 +818,6 @@ async function main(): Promise<void> {
     }
     // Non-TTY: use the text-based prompt mode
     await runPromptMode(vaultPath, password);
-    return;
-  }
-
-  if (scope === Scope.Help || scope === Scope.HelpFlag) {
-    console.log(help());
     return;
   }
 
