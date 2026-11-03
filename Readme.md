@@ -276,7 +276,9 @@ bun run build:cli
 cd apps/cli && npm publish
 ```
 
-The package includes only `dist/autho.js` and `README.md` (~15 KB tarball).
+The package includes the CLI bundle in `dist/autho.js`, `README.md` and npm package
+metadata. The bundle also embeds the local web UI; native TUI dependencies install
+separately for your platform.
 
 ## Upgrading
 

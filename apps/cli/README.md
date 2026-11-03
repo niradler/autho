@@ -115,21 +115,38 @@ Override with `AUTHO_HOME` or `--vault <path>`.
 
 ## Agent Usage
 
-Autho is designed for coding agents that need secrets at runtime:
+Humans can approve exact secrets for an agent without sharing their master password:
 
 ```bash
-# Set password once
-export AUTHO_MASTER_PASSWORD="..."
+# Human: unlock and start the local daemon using normal vault authentication
+autho daemon start
 
-# Agent creates a scoped, time-limited lease
-autho lease create --secret github --secret openai --ttl 300 --json
+# Human: approve an existing secret for five minutes
+# GITHUB_SECRET_REF contains its vault entry name, not the secret value
+autho lease create --key --secret "$GITHUB_SECRET_REF" --ttl 300 --json
 
-# Agent runs with injected env
-autho exec --lease <id> --map GITHUB_TOKEN=github --map OPENAI_KEY=openai -- node build.js
+# Agent: launcher supplies the returned leaseKey through AUTHO_LEASE_KEY
+autho exec --map GITHUB_TOKEN=github -- node build.js
 
-# Lease auto-expires or can be revoked
+# Human: revoke before expiry
 autho lease revoke --lease <id>
 ```
+
+Keys allow only approved reads, OTP, env injection, exec and lease inspection.
+They expire or revoke at the daemon and are invalidated on daemon restart. New
+links cannot widen an issued key. Already delivered values cannot be recalled or
+invalidated at their external provider; this is an API boundary, not an OS sandbox.
+
+Optional OS keyring storage is off by default. Enable it with
+`autho config set saveLeaseKeys true`, issue a new key, then use
+`autho exec --lease-keyring <id> --map GITHUB_TOKEN=github -- node build.js`.
+Only the lease credential is saved; expiry/revocation triggers cleanup, with no
+plaintext fallback if saving fails. You can also supply a key using
+`--lease-key-file <private-file>`.
+
+Owner-authenticated `lease create` without `--key` remains available. See the
+[full lease-key guide](https://github.com/niradler/autho#agent-usage)
+for scope, replacement, cleanup and trust boundaries.
 
 ## License
 
