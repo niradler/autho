@@ -192,7 +192,7 @@ function metadataFrom(body: Body, type: string): Record<string, unknown> {
 // ── Vault access ─────────────────────────────────────────────────
 
 async function withVault<T>(ctx: ApiContext, session: WebSession, fn: (vault: VaultSession) => T): Promise<T> {
-  const vault = new VaultSession(new AuthoDatabase(ctx.vaultPath), session.rootKey, {
+  const vault = new VaultSession(new AuthoDatabase(ctx.vaultPath), Buffer.from(session.rootKey), {
     sealBound: session.sealBound,
     sealRecord: await loadSealRecord(ctx.vaultPath),
     source: "web",

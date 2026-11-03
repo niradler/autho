@@ -35,6 +35,7 @@ export type AuthoConfig = {
   mouse?: boolean;
   /** Seconds; older configs may hold it as a string. */
   defaultLeaseTtl?: number | string;
+  saveLeaseKeys?: boolean;
   daemonTtlSeconds?: number;
   webPort?: number;
   webWithTui?: boolean;

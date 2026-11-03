@@ -1275,6 +1275,7 @@ export class VaultSession {
 
   close(): void {
     this.sealKey.fill(0);
+    this.rootKey.fill(0);
     this.db.close();
   }
 
@@ -2012,6 +2013,7 @@ export class VaultSession {
   private buildEnv(
     mappings: EnvMapping[],
     leaseId?: string,
+    grant?: { expiresAt: string; secretIds: readonly string[] },
   ): InjectedEnv {
     if (mappings.length === 0) {
       throw new Error("Provide at least one env mapping");
@@ -2019,11 +2021,13 @@ export class VaultSession {
 
     return this.db.immediateTransaction(() => {
       this.requireIntactSeal();
+      if (grant && Date.parse(grant.expiresAt) <= Date.now()) throw new Error("Lease key expired");
       const lease = leaseId ? this.getActiveLeaseOrThrow(leaseId) : null;
-      const env: Record<string, string> = {};
+      const env: Record<string, string> = Object.create(null);
       const secrets: InjectedEnv["secrets"] = [];
       for (const mapping of mappings) {
         const secret = this.getSecretOrThrow(mapping.secretRef);
+        if (grant && !grant.secretIds.includes(secret.id)) throw new Error("Secret is outside the approved lease key grant");
         if (lease) {
           const { via } = this.leaseAccess(lease, secret);
           if (via) {
@@ -2061,6 +2065,43 @@ export class VaultSession {
     const { message, metadata } = this.injectionAudit(injected);
     this.audit("env.rendered", "lease", injected.lease?.id ?? null, `Environment rendered: ${message}`, metadata, injected.lease?.id ?? null);
 
+    return injected.env;
+  }
+
+  approveLeaseKey(id: string): { coverage: LeaseCoverage[]; lease: LeaseState } {
+    return this.db.immediateTransaction(() => {
+      this.requireIntactSeal();
+      this.getActiveLeaseOrThrow(id);
+      const approved = this.showLease(id);
+      if (approved.coverage.length === 0) throw new Error("Lease has no available secrets");
+      this.audit("lease.key_issued", "lease", id, "Lease key issued", {
+        expiresAt: approved.lease.expiresAt,
+        secretIds: approved.coverage.map((secret) => secret.id),
+      }, id);
+      return approved;
+    });
+  }
+
+  inspectLeaseKey(grant: { expiresAt: string; leaseId: string; secretIds: readonly string[] }): { coverage: LeaseCoverage[]; expiresAt: string; id: string } {
+    return this.db.immediateTransaction(() => {
+      this.requireIntactSeal();
+      const lease = this.getActiveLeaseOrThrow(grant.leaseId);
+      if (Date.parse(grant.expiresAt) <= Date.now()) throw new Error("Lease key expired");
+      return {
+        coverage: this.showLease(lease.id).coverage.filter((secret) => grant.secretIds.includes(secret.id)),
+        expiresAt: new Date(Math.min(Date.parse(grant.expiresAt), Date.parse(lease.expiresAt))).toISOString(),
+        id: lease.id,
+      };
+    });
+  }
+
+  renderLeaseEnv(mappings: EnvMapping[], grant: { expiresAt: string; leaseId: string; secretIds: readonly string[] }): Record<string, string> {
+    const injected = this.buildEnv(mappings, grant.leaseId, grant);
+    const { message, metadata } = this.injectionAudit(injected);
+    this.audit("env.rendered", "lease", grant.leaseId, `Environment rendered: ${message}`, {
+      ...metadata,
+      credential: "lease-key",
+    }, grant.leaseId);
     return injected.env;
   }
 

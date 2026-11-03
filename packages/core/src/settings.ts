@@ -12,6 +12,7 @@ export type PreferenceKey =
   | "passwordSymbols"
   | "mouse"
   | "defaultLeaseTtl"
+  | "saveLeaseKeys"
   | "daemonTtlSeconds"
   | "webPort"
   | "webWithTui"
@@ -50,6 +51,7 @@ export const PREFERENCES: readonly PreferenceSpec[] = [
   { kind: "boolean", key: "passwordSymbols", label: "Use symbols", help: "Include !@#$%^&*-_=+ in generated passwords", default: true },
   { kind: "boolean", key: "mouse", label: "Mouse", help: "Click and drag-select in the TUI (off = your terminal's own selection). Applies on next start", default: true },
   { kind: "number", key: "defaultLeaseTtl", label: "Lease TTL", help: "Used by `lease create` when --ttl is not given (0 = always ask)", unit: "s", default: 0, min: 0, max: 2_592_000, zero: "required" },
+  { kind: "boolean", key: "saveLeaseKeys", label: "Save lease keys", help: "Save newly issued lease keys in this device's OS keyring; remove them on expiry or revocation. Requires the daemon", default: false },
   { kind: "number", key: "daemonTtlSeconds", label: "Daemon session", help: "How long `daemon unlock` keeps the vault open without --ttl", unit: "s", default: 900, min: 60, max: 86_400 },
   { kind: "number", key: "webPort", label: "Web UI port", help: "Port for `autho web serve` (when --port is not given) and for the web UI the TUI serves", default: 8061, min: 1024, max: 65_535 },
   { kind: "boolean", key: "webWithTui", label: "Web UI with TUI", help: "Serve the web UI on localhost while the TUI is open; it unlocks on its own. Applies on next start", default: true, env: "AUTHO_WEB_WITH_TUI" },

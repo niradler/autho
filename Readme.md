@@ -212,7 +212,7 @@ Press `5` in the TUI (or pick Settings in the palette) for one page with everyth
 | Storage | See and copy the vault, config, project and daemon paths; point autho at another vault folder |
 | Security | Change the master password, remember it in the OS keychain, set a PIN, turn two-factor codes on or off, add or remove passkeys and security keys, create or revoke the recovery file |
 | Behaviour | Reveal timeout, clipboard clear, auto-lock, generated password length and symbols, mouse |
-| Agents & services | Default lease TTL, daemon session TTL, web UI port, web UI with the TUI (and its address), audit retention |
+| Agents & services | Default lease TTL, save lease keys in the OS keyring (off by default), daemon session TTL, web UI port, web UI with the TUI (and its address), audit retention |
 | About | Version, runtime, OS secret store |
 
 Security changes ask for the master password (and two-factor code) once per visit; the handle is dropped when you leave Settings. Changing the vault folder only changes the setting — move `vault.db` yourself, then restart autho.
@@ -329,7 +329,88 @@ bun test
 
 ## Agent Usage
 
-Autho is designed for coding agents that need secrets at runtime:
+Give an agent a **lease key**, not vault unlock credentials. A lease key authenticates
+only the approved secrets until its deadline. Keep the local daemon running:
+
+```bash
+# Human: start the daemon in a separate terminal
+autho daemon serve
+
+# Human: approve these exact secrets for 15 minutes using normal vault authentication
+autho lease create --key --name build-agent --secret github --secret openai --ttl 900 --json
+
+# Agent: receive the returned leaseKey through a secure environment reference
+# AUTHO_LEASE_KEY is supplied by your launcher, not pasted into shell history
+autho exec --map GITHUB_TOKEN=github --map OPENAI_KEY=openai -- node build.js
+autho secrets get --ref github --json
+
+# Human: revoke before the deadline
+autho lease revoke --lease <id>
+```
+
+Issuing a key is the human approval step. Keys permit `secrets get`, `otp code`,
+`env render`, `exec`, and `lease show`. Agent commands skip master-password prompts
+and saved-master-password lookup, never fall back to a full vault unlock, and cannot
+create leases or use daemon administration. An optional `--lease <id>` checks that
+the key belongs to the expected lease. Keys are never accepted in argv; use
+`AUTHO_LEASE_KEY`, `--lease-key-file <private-file>`, or the keyring flow below.
+
+### Save Lease Keys In This Device's Keyring
+
+The **Save lease keys** setting is under **Agents & services** in the TUI/web UI,
+or can be changed with the CLI. It is off by default and applies to newly issued keys:
+
+```bash
+# Human
+autho config set saveLeaseKeys true
+autho lease create --key --secret github --ttl 900 --json
+# Returns id, expiry and keyStored: true; the key itself is not printed
+
+# Agent: retrieve only this lease's credential from the OS keyring
+autho exec --lease-keyring <lease-id> --map GITHUB_TOKEN=github -- node build.js
+autho lease show --lease-keyring <lease-id> --json
+
+# Stop saving future keys; existing grants still expire or can be revoked
+autho config set saveLeaseKeys false
+```
+
+Only the lease key is saved in the `autho.lease` keyring service. Its cleanup index
+contains lease IDs and deadlines, never credentials. If saving fails, issuance fails
+and a newly created lease is revoked; there is no plaintext-file fallback. The daemon
+checks every request against the current lease, its original deadline and approved
+secret IDs, plus the vault integrity seal. Expiry or revocation denies further reads
+immediately; the daemon removes saved keys on its next sweep (normally within a
+second). If the keyring is unavailable it retries. Expired keys are also cleaned on
+the next daemon start or when an agent next retrieves an expired key. Restarting the daemon invalidates all its issued keys and
+cleans up saved keys; the human must issue new ones.
+
+New `lease create --key` grants include only the named secrets. To issue or replace a
+key for a lease created earlier through the CLI, TUI or web UI:
+
+```bash
+autho lease key --lease <id> --json
+```
+
+This keeps the original deadline and snapshots the currently covered secrets,
+including existing links. Replacement invalidates the previous key. Linking more
+secrets later never widens an issued key; unlinking removes access immediately.
+Use `lease show` with the agent credential to inspect its current coverage.
+
+**Boundary:** values already delivered to an agent or child process cannot be recalled.
+Expiry does not stop an already running command or invalidate the token at its provider.
+`exec` runs locally in the agent's process, not inside the daemon, and omits the lease
+key and master-password environment variable from the child environment. Programs
+can still load their own `.env` files. These credentials are an API boundary, not an
+OS sandbox: a process with access to the human's keyring/admin credentials or daemon
+memory can bypass it. Isolate untrusted agents from those resources. Provider-side
+temporary credentials or a service-specific proxy are needed to enforce expiry on
+external use without handing out the underlying secret.
+
+### Existing Owner-Authenticated Leases
+
+The original `lease create` (without `--key`) and `exec --lease <id>` flows remain
+available for the vault owner and still require vault authentication. These leases
+cover linked secrets live. They are not standalone agent credentials:
 
 ```bash
 # After saving to OS keychain via `autho init` — no env var needed
