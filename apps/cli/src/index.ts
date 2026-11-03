@@ -1,8 +1,9 @@
 #!/usr/bin/env bun
 
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { createInterface } from "node:readline/promises";
 import { basename, isAbsolute, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { CLEAR_COMMAND, runDetachedClear } from "./clipboard.ts";
 import { newPrfSalt, runPasskeyCeremony } from "./passkey.ts";
 import pkg from "../package.json";
@@ -10,6 +11,8 @@ import { confirm, readLine, readPasswordMasked } from "./password.ts";
 
 import {
   daemonExec,
+  daemonIssueLeaseKey,
+  daemonRevokeLeaseKey,
   daemonLock,
   daemonRenderEnv,
   daemonStatus,
@@ -17,7 +20,10 @@ import {
   daemonUnlock,
   defaultDaemonStatePath,
   startDaemonServer,
+  leaseKeyRequest,
+  type LeaseKeyInfo,
 } from "../../../packages/core/src/daemon.ts";
+import { LeaseKeyring } from "../../../packages/core/src/lease-keyring.ts";
 import {
   AUDIT_SOURCES,
   VaultService,
@@ -34,6 +40,7 @@ import {
   formatPreference,
   loadConfig,
   numberPreference,
+  booleanPreference,
   parsePreference,
   parseRecoveryFile,
   preferenceSpec,
@@ -115,6 +122,7 @@ enum Action {
   Generate = "generate",
   Get = "get",
   Init = "init",
+  Key = "key",
   Legacy = "legacy",
   List = "list",
   Lock = "lock",
@@ -236,6 +244,52 @@ function output(value: unknown, jsonMode = false): void {
   }
 
   console.log(value);
+}
+
+async function runLeaseKeyCommand(args: ParsedArgs, statePath: string, projectFile: string | undefined, jsonMode: boolean): Promise<void> {
+  const [scope, action] = args.positionals;
+  const file = getString(args, "lease-key-file");
+  const saved = getString(args, "lease-keyring");
+  const fromEnv = process.env.AUTHO_LEASE_KEY;
+  if ([file, saved, fromEnv].filter((value) => value !== undefined).length !== 1) {
+    throw new Error("Choose exactly one lease credential: AUTHO_LEASE_KEY, --lease-key-file, or --lease-keyring");
+  }
+  if (args.options.password !== undefined || args.options.session !== undefined || args.options.passkey !== undefined || args.options["recovery-file"] !== undefined) {
+    throw new Error("Lease credentials cannot be combined with vault unlock credentials");
+  }
+  const allowed = (scope === Scope.Env && action === Action.Render) || scope === Scope.Exec ||
+    (scope === Scope.Secrets && action === Action.Get) || (scope === Scope.Otp && action === Action.Code) ||
+    (scope === Scope.Lease && action === Action.Show);
+  if (!allowed) throw new Error("Lease keys allow only secrets get, otp code, env render, exec and lease show");
+  let leaseKey: string;
+  if (file) leaseKey = readFileSync(absolutePath(file), "utf8").trim();
+  else if (saved) leaseKey = await new LeaseKeyring(statePath).load(saved);
+  else leaseKey = fromEnv!;
+  const info = await leaseKeyRequest<LeaseKeyInfo>({ leaseKey, path: "/lease/show", statePath });
+  const expectedLease = getString(args, "lease") ?? saved;
+  if (expectedLease && expectedLease !== info.id) throw new Error("Lease key does not match the requested lease");
+  if (scope === Scope.Lease) {
+    output(info, jsonMode);
+    return;
+  }
+  const ref = getString(args, "ref") ?? getString(args, "name") ?? getString(args, "id");
+  if (scope === Scope.Otp && !info.coverage.some((secret) => (secret.id === ref || secret.name === ref) && secret.type === "otp")) {
+    throw new Error("Select an approved OTP secret");
+  }
+  const mappings = scope === Scope.Secrets || scope === Scope.Otp
+    ? [{ envName: "AUTHO_VALUE", secretRef: required(ref, "--ref") }]
+    : resolveMappings({ maps: getStrings(args, "map"), projectFile });
+  if (scope === Scope.Exec && args.passthrough.length === 0) throw new Error("Missing command after --");
+  const env = await leaseKeyRequest<Record<string, string>>({ leaseKey, mappings, path: "/lease/env", statePath });
+  if (scope === Scope.Secrets) { output({ name: ref, value: env.AUTHO_VALUE }, jsonMode); return; }
+  if (scope === Scope.Otp) { output({ secret: ref, code: env.AUTHO_VALUE }, jsonMode); return; }
+  if (scope === Scope.Env) { output(env, jsonMode); return; }
+  const childEnv = { ...process.env, ...env };
+  delete childEnv.AUTHO_LEASE_KEY;
+  delete childEnv.AUTHO_MASTER_PASSWORD;
+  const result = spawnSync(args.passthrough[0], args.passthrough.slice(1), { env: childEnv, stdio: "inherit" });
+  if (result.error) throw new Error("Failed to start lease command");
+  process.exitCode = result.status ?? 1;
 }
 
 /** `autho groups list|create|rename|rm`. Names can be positional or passed as --name / --new-name. */
@@ -651,6 +705,10 @@ function help(): string {
     "  groups rm <name> [--yes] [--vault <path>] [--json]   Secrets in it become ungrouped, never deleted",
     "  otp code --ref <name-or-id> [--vault <path>] [--json]",
     "  lease create --secret <ref> [--secret <ref>] [--ttl <seconds>] [--name <v>] [--no-links] [--vault <path>] [--json]",
+    "  lease create --key --secret <ref> --ttl <seconds> [--name <v>] [--state-file <path>] [--json]",
+    "  lease key --lease <id> [--state-file <path>] [--json]   Issue/replace a key for an existing lease",
+    "  Agent credentials: AUTHO_LEASE_KEY, --lease-key-file <path>, or --lease-keyring <lease-id>",
+    "  Lease keys support secrets get, otp code, env render, exec, lease show; never need master credentials.",
     "  lease show --lease <id> [--vault <path>] [--json]",
     "  lease revoke --lease <id> [--vault <path>] [--json]",
     "  vault verify [--vault <path>] [--json]",
@@ -725,8 +783,13 @@ async function main(): Promise<void> {
 
   const args = parseArgs(process.argv.slice(2));
   const [scope, action, subaction] = args.positionals;
+  if (args.options["lease-key"] !== undefined) throw new Error("Use AUTHO_LEASE_KEY, --lease-key-file or --lease-keyring; lease keys must not be passed in argv");
   if (scope === Scope.Version || (!scope && process.argv.includes("--version"))) {
     console.log(pkg.version);
+    return;
+  }
+  if (scope === Scope.Help || scope === Scope.HelpFlag || (!scope && (process.argv.includes("--help") || process.argv.includes("-h")))) {
+    console.log(help());
     return;
   }
   const jsonMode = getBoolean(args, "json");
@@ -735,17 +798,15 @@ async function main(): Promise<void> {
   const explicitProjectFile = getString(args, "project-file");
   const fallbackProjectFile = defaultProjectFilePath();
   const projectFile = explicitProjectFile ?? (existsSync(fallbackProjectFile) ? fallbackProjectFile : undefined);
+  if (process.env.AUTHO_LEASE_KEY !== undefined || args.options["lease-key-file"] !== undefined || args.options["lease-keyring"] !== undefined) {
+    await runLeaseKeyCommand(args, statePath, projectFile, jsonMode);
+    return;
+  }
   let password = getString(args, "password") ?? process.env.AUTHO_MASTER_PASSWORD;
 
   // Fall back to OS secret store before prompting interactively
   if (!password) {
     password = (await loadVaultPassword(vaultPath)) ?? undefined;
-  }
-
-  // `--help` parses as a flag, which leaves scope empty.
-  if (!scope && (process.argv.includes("--help") || process.argv.includes("-h"))) {
-    console.log(help());
-    return;
   }
 
   if (!scope) {
@@ -757,11 +818,6 @@ async function main(): Promise<void> {
     }
     // Non-TTY: use the text-based prompt mode
     await runPromptMode(vaultPath, password);
-    return;
-  }
-
-  if (scope === Scope.Help || scope === Scope.HelpFlag) {
-    console.log(help());
     return;
   }
 
@@ -975,6 +1031,20 @@ async function main(): Promise<void> {
 
   if (scope === Scope.Daemon && action === Action.Status) {
     output(await daemonStatus({ statePath }), jsonMode);
+    return;
+  }
+
+  if (scope === Scope.Lease && (action === Action.Key || (action === Action.Create && getBoolean(args, "key")))) {
+    const credentials = await resolveUnlockCredentials(vaultPath, args, password);
+    output(await daemonIssueLeaseKey({
+      credentials,
+      leaseId: action === Action.Key ? required(getString(args, "lease"), "--lease") : undefined,
+      name: action === Action.Create ? getString(args, "name") ?? "agent" : undefined,
+      remember: booleanPreference("saveLeaseKeys"),
+      secretRefs: action === Action.Create ? getStrings(args, "secret") : undefined,
+      statePath,
+      ttlSeconds: action === Action.Create ? leaseTtl(args) : undefined,
+    }), jsonMode);
     return;
   }
 
@@ -1302,7 +1372,11 @@ async function main(): Promise<void> {
     }
 
     if (scope === Scope.Lease && action === Action.Revoke) {
-      output(session.revokeLease(required(getString(args, "lease"), "--lease")), jsonMode);
+      const leaseId = required(getString(args, "lease"), "--lease");
+      output(session.revokeLease(leaseId), jsonMode);
+      await daemonRevokeLeaseKey({ statePath, leaseId }).catch(() => {
+        console.error("Lease revoked; OS keyring cleanup will retry when Autho is running.");
+      });
       return;
     }
 

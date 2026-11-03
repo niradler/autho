@@ -25,7 +25,7 @@ const SECTIONS = [
 type SectionId = (typeof SECTIONS)[number]["id"];
 
 const BEHAVIOUR_KEYS = ["revealSeconds", "clipboardClearSeconds", "idleLockSeconds", "passwordLength", "passwordSymbols", "mouse"];
-const AGENT_KEYS = ["defaultLeaseTtl", "daemonTtlSeconds", "webPort", "webWithTui", "auditRetentionDays"];
+const AGENT_KEYS = ["defaultLeaseTtl", "saveLeaseKeys", "daemonTtlSeconds", "webPort", "webWithTui", "auditRetentionDays"];
 const UNIT_NAMES: Record<string, string> = { s: "Seconds", d: "Days" };
 
 type SettingsDialog =

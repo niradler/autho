@@ -3,7 +3,10 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 
 import { AuthoDatabase } from "../../storage/src/index.ts";
 import { randomId } from "../../crypto/src/index.ts";
-import { VaultService, VaultSession, type EnvMapping, type VaultStatus } from "./index.ts";
+import { VaultService, VaultSession, type EnvMapping, type LeaseState, type VaultStatus } from "./index.ts";
+import { LeaseKeyring } from "./lease-keyring.ts";
+import { LeaseKeyRegistry } from "./lease-keys.ts";
+import { LeaseInputError, leaseObject, parseLeaseIssue, parseLeaseMappings, type LeaseIssueInput } from "./lease-validation.ts";
 import { closeSessionAndRecordSeal, loadSealRecord } from "./os-secrets.ts";
 import { defaultDaemonStatePath, writeTextFileSecure } from "./paths.ts";
 
@@ -170,7 +173,7 @@ export async function deleteDaemonState(statePath: string): Promise<void> {
 
 /** Opens a session per request, with the current keychain seal record so a swapped-in older vault file is caught. */
 async function openSessionFromRootKey(session: DaemonSession): Promise<VaultSession> {
-  return new VaultSession(new AuthoDatabase(session.vaultPath), session.rootKey, {
+  return new VaultSession(new AuthoDatabase(session.vaultPath), Buffer.from(session.rootKey), {
     sealBound: session.sealBound,
     sealRecord: await loadSealRecord(session.vaultPath),
     source: "daemon",
@@ -184,7 +187,11 @@ async function readJson<T>(request: Request): Promise<T> {
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data, null, 2), {
     headers: {
+      "cache-control": "no-store",
       "content-type": "application/json; charset=utf-8",
+      "x-content-type-options": "nosniff",
+      "x-frame-options": "DENY",
+      "x-request-id": typeof data === "object" && data !== null && "requestId" in data && typeof data.requestId === "string" ? data.requestId : crypto.randomUUID(),
     },
     status,
   });
@@ -214,47 +221,233 @@ type DaemonClientOptions = {
 };
 
 export async function startDaemonServer(options: ServeOptions): Promise<void> {
+  if (!["127.0.0.1", "localhost", "::1"].includes(options.host)) throw new Error("Daemon must bind to loopback");
+  const existing = readDaemonState(options.statePath);
+  if (existing && Number.isSafeInteger(existing.pid) && existing.pid > 0) {
+    let running = true;
+    try { process.kill(existing.pid, 0); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") running = false;
+    }
+    if (running) throw new Error("A daemon already owns this state file; stop it before starting another");
+  }
   const sessions = new Map<string, DaemonSession>();
+  const leaseKeys = new LeaseKeyRegistry();
+  const keyring = new LeaseKeyring(options.statePath);
+  await keyring.cleanup(true);
   const startedAt = new Date().toISOString();
   const token = randomId(24);
+  let published = false;
+  const ownsState = (): boolean => {
+    try {
+      const state = readDaemonState(options.statePath);
+      return state?.pid === process.pid && state.startedAt === startedAt;
+    } catch { return false; }
+  };
 
   const cleanupExpiredSessions = (): void => {
     const now = Date.now();
     for (const [id, session] of sessions.entries()) {
       if (Date.parse(session.expiresAt) <= now) {
+        session.rootKey.fill(0);
         sessions.delete(id);
       }
     }
   };
 
   let server: Bun.Server<undefined> | null = null;
+  let sweeping = false;
+  let stopping = false;
+  let issuing = false;
+  let requestWindow = Date.now();
+  let leaseRequests = 0;
+  const pendingKeyCleanup = new Set<string>();
+  const expireLeaseKeys = (): void => {
+    for (const grant of leaseKeys.list()) {
+      if (!leaseKeys.expired(grant)) continue;
+      leaseKeys.revoke(grant.leaseId);
+      pendingKeyCleanup.add(grant.leaseId);
+    }
+  };
+  const sweepLeaseKeys = async (): Promise<void> => {
+    expireLeaseKeys();
+    if (sweeping) return;
+    sweeping = true;
+    try {
+      if (leaseKeys.list().length > 0) {
+        const db = new AuthoDatabase(options.vaultPath);
+        try {
+          for (const grant of leaseKeys.list()) {
+            const lease = db.findLease(grant.leaseId);
+            if (!lease || lease.revokedAt || leaseKeys.expired(grant) || Date.parse(lease.expiresAt) <= Date.now()) {
+              leaseKeys.revoke(grant.leaseId);
+              pendingKeyCleanup.add(grant.leaseId);
+            }
+          }
+        } finally {
+          db.close();
+        }
+      }
+    } finally {
+      try {
+        for (const leaseId of pendingKeyCleanup) {
+          try {
+            await keyring.forget(leaseId);
+            pendingKeyCleanup.delete(leaseId);
+          } catch { /* Keep the cleanup obligation for the next sweep. */ }
+        }
+        await keyring.cleanup();
+      } finally {
+        sweeping = false;
+      }
+    }
+  };
+  const sweepTimer = setInterval(() => {
+    if (published && !ownsState()) { shutdown(); return; }
+    cleanupExpiredSessions();
+    void sweepLeaseKeys().catch(() => undefined);
+  }, 1000);
 
   const shutdown = (): void => {
-    void deleteDaemonState(options.statePath).then(() => {
-      server?.stop(true);
+    if (stopping) return;
+    stopping = true;
+    clearInterval(sweepTimer);
+    leaseKeys.clear();
+    for (const session of sessions.values()) session.rootKey.fill(0);
+    sessions.clear();
+    const drainDeadline = setTimeout(() => {
+      void server?.stop(true);
+      process.exit(0);
+    }, 5000);
+    void (async () => {
+      if (!ownsState()) return;
+      await keyring.cleanup(true).catch(() => undefined);
+      if (ownsState()) await deleteDaemonState(options.statePath);
+    })().finally(async () => {
+      await server?.stop(false);
+      clearTimeout(drainDeadline);
       process.exit(0);
     });
   };
 
   const auth = (request: Request): Response | null => {
     const provided = getBearerToken(request);
-    if (!provided || provided.length !== token.length || !timingSafeEqual(Buffer.from(provided), Buffer.from(token))) {
+    if (!provided || Buffer.byteLength(provided) !== Buffer.byteLength(token) || !timingSafeEqual(Buffer.from(provided), Buffer.from(token))) {
       return unauthorized();
     }
     return null;
   };
 
   server = Bun.serve({
+    maxRequestBodySize: 128 * 1024,
     async fetch(request) {
       cleanupExpiredSessions();
 
       const url = new URL(request.url);
+      if (!published || !ownsState()) return json({ error: "Daemon does not own its state file" }, 503);
+      if (stopping) return json({ error: "Daemon is stopping" }, 503);
+      const hosts = new Set([`127.0.0.1:${server?.port}`, `localhost:${server?.port}`, `[::1]:${server?.port}`]);
+      if (!hosts.has(request.headers.get("host") ?? "")) return json({ error: "Invalid daemon host" }, 421);
+      if (request.headers.has("origin") || (request.headers.get("sec-fetch-site") ?? "none") !== "none") {
+        return json({ error: "Browser requests are not supported by the daemon" }, 403);
+      }
       if (request.method === "GET" && url.pathname === "/health") {
         return json({
           ok: true,
           running: true,
           startedAt,
         });
+      }
+
+      if (url.pathname.startsWith("/lease/")) {
+        const requestId = crypto.randomUUID();
+        const fail = (error: string, status: number): Response => json({ error, requestId }, status);
+        if (Date.now() - requestWindow >= 1000) { requestWindow = Date.now(); leaseRequests = 0; }
+        if (++leaseRequests > 120) return fail("Too many lease requests", 429);
+        if (request.method !== "POST") return fail("Method not allowed", 405);
+        if (request.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") return fail("Expected application/json", 400);
+        if (url.pathname === "/lease/revoke-key") {
+          if (auth(request)) return fail("Unauthorized daemon request", 401);
+          try {
+            const body = leaseObject(await request.json(), ["leaseId"]);
+            if (typeof body.leaseId !== "string" || !/^[a-f0-9]{32}$/.test(body.leaseId)) throw new LeaseInputError("Invalid lease ID");
+            leaseKeys.revoke(body.leaseId);
+            await keyring.forget(body.leaseId);
+            return json({ revoked: true });
+          } catch (error) {
+            if (error instanceof LeaseInputError || error instanceof SyntaxError) return fail("Invalid revocation request", 400);
+            return fail("Lease key invalidated; OS keyring cleanup pending", 503);
+          }
+        }
+        if (url.pathname === "/lease/issue") {
+          if (auth(request)) return fail("Unauthorized daemon request", 401);
+          if (issuing) return fail("Lease issuance is busy; retry shortly", 429);
+          issuing = true;
+          let vaultSession: VaultSession | undefined;
+          let createdLeaseId: string | undefined;
+          let issuedLeaseId: string | undefined;
+          try {
+            const input = parseLeaseIssue(await request.json());
+            if (stopping || !ownsState()) throw new Error("Daemon is stopping");
+            vaultSession = VaultService.unlock(options.vaultPath, {
+              ...input.credentials,
+              sealRecord: await loadSealRecord(options.vaultPath),
+              source: "daemon",
+            }, { recordUnlock: false });
+            if (stopping || !ownsState()) throw new Error("Daemon is stopping");
+            let leaseId = input.leaseId;
+            if (!leaseId) {
+              const lease = vaultSession.createLease({
+                name: input.name!, noLinks: true, secretRefs: input.secretRefs!, ttlSeconds: input.ttlSeconds!,
+              });
+              leaseId = lease.id;
+              createdLeaseId = lease.id;
+            }
+            await keyring.forget(leaseId);
+            if (stopping || !ownsState()) throw new Error("Daemon is stopping");
+            const issued = leaseKeys.issue(vaultSession, leaseId, options.vaultPath);
+            issuedLeaseId = leaseId;
+            if (input.remember) await keyring.save(leaseId, issued.lease.expiresAt, issued.leaseKey);
+            if (stopping || !ownsState()) throw new Error("Daemon is stopping");
+            return json({ ...issued.lease, keyStored: input.remember, leaseKey: input.remember ? undefined : issued.leaseKey });
+          } catch (error) {
+            if (issuedLeaseId) {
+              leaseKeys.revoke(issuedLeaseId);
+              await keyring.forget(issuedLeaseId).catch(() => undefined);
+            }
+            if (createdLeaseId && vaultSession) vaultSession.revokeLease(createdLeaseId);
+            if (error instanceof LeaseInputError || error instanceof SyntaxError) return fail(error instanceof SyntaxError ? "Invalid JSON" : error.message, 400);
+            return fail("Lease key could not be issued; check credentials, lease, vault integrity and OS keyring availability", 403);
+          } finally {
+            if (vaultSession) await closeSessionAndRecordSeal(options.vaultPath, vaultSession);
+            issuing = false;
+          }
+        }
+
+        const grant = leaseKeys.get(getBearerToken(request));
+        if (!grant) return fail("Invalid or expired lease key", 401);
+        if (url.pathname !== "/lease/env" && url.pathname !== "/lease/show") return fail("Forbidden lease operation", 403);
+        const rootKey = Buffer.from(grant.rootKey);
+        let vaultSession: VaultSession | undefined;
+        try {
+          const body: unknown = await request.json();
+          vaultSession = new VaultSession(new AuthoDatabase(grant.vaultPath), rootKey, {
+            sealBound: grant.sealBound,
+            sealRecord: await loadSealRecord(grant.vaultPath),
+            source: "daemon",
+          });
+          if (stopping || !ownsState() || leaseKeys.expired(grant) || leaseKeys.get(getBearerToken(request)) !== grant) return fail("Invalid or expired lease key", 401);
+          if (url.pathname === "/lease/show") {
+            leaseObject(body, []);
+            return json(vaultSession.inspectLeaseKey(grant));
+          }
+          return json(vaultSession.renderLeaseEnv(parseLeaseMappings(body), grant));
+        } catch (error) {
+          if (error instanceof LeaseInputError || error instanceof SyntaxError) return fail(error instanceof SyntaxError ? "Invalid JSON" : error.message, 400);
+          return fail("Lease access denied", 403);
+        } finally {
+          if (vaultSession) await closeSessionAndRecordSeal(grant.vaultPath, vaultSession);
+          rootKey.fill(0);
+        }
       }
 
       const authResponse = auth(request);
@@ -318,6 +511,7 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
 
         if (request.method === "POST" && url.pathname === "/lock") {
           const body = await readJson<{ sessionId: string }>(request);
+          sessions.get(body.sessionId)?.rootKey.fill(0);
           sessions.delete(body.sessionId);
           return json({ locked: true, sessionId: body.sessionId });
         }
@@ -384,10 +578,11 @@ export async function startDaemonServer(options: ServeOptions): Promise<void> {
     vaultPath: options.vaultPath,
     version: 1,
   });
+  writeTextFileSecure(`${options.statePath}.endpoint.json`, JSON.stringify({ port: server.port, startedAt }) + "\n");
+  published = true;
 
   const onSignal = (): void => {
     shutdown();
-    process.exit(0);
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
@@ -416,11 +611,55 @@ async function daemonRequest<T>(state: DaemonState, path: string, body: unknown)
       "content-type": "application/json",
     },
     method: "POST",
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
   });
   const data = (await response.json()) as { error?: string };
   if (!response.ok) {
     throw new Error(data.error ?? `Daemon request failed: ${response.status}`);
   }
+  return data as T;
+}
+
+export type LeaseKeyIssueResult = LeaseState & { keyStored: boolean; leaseKey?: string };
+export type LeaseKeyInfo = ReturnType<VaultSession["inspectLeaseKey"]>;
+
+export async function daemonRevokeLeaseKey(options: DaemonClientOptions & { leaseId: string }): Promise<void> {
+  const state = readDaemonState(options.statePath);
+  if (!state) return;
+  await daemonRequest(state, "/lease/revoke-key", { leaseId: options.leaseId });
+}
+
+export async function daemonIssueLeaseKey(options: DaemonClientOptions & LeaseIssueInput): Promise<LeaseKeyIssueResult> {
+  const state = readDaemonState(options.statePath);
+  if (!state) throw new Error("Start the Autho daemon before issuing a lease key");
+  const { password, totp, recovery, passkey } = options.credentials;
+  return daemonRequest(state, "/lease/issue", {
+    credentials: { password, totp, recovery, passkey },
+    leaseId: options.leaseId,
+    name: options.name,
+    remember: options.remember,
+    secretRefs: options.secretRefs,
+    ttlSeconds: options.ttlSeconds,
+  });
+}
+
+export async function leaseKeyRequest<T>(options: DaemonClientOptions & { leaseKey: string; path: "/lease/env" | "/lease/show"; mappings?: EnvMapping[] }): Promise<T> {
+  if (!/^autho_lease_[a-f0-9]{64}$/.test(options.leaseKey)) throw new Error("Invalid lease key");
+  const path = `${options.statePath}.endpoint.json`;
+  if (!existsSync(path)) throw new Error("Autho daemon endpoint not found; start the daemon and issue a lease key");
+  const endpoint: unknown = JSON.parse(readFileSync(path, "utf8"));
+  const port = (endpoint as { port?: unknown } | null)?.port;
+  if (!Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535) throw new Error("Invalid daemon endpoint");
+  const response = await fetch(`http://127.0.0.1:${port}${options.path}`, {
+    body: JSON.stringify(options.path === "/lease/show" ? {} : { mappings: options.mappings }),
+    headers: { authorization: `Bearer ${options.leaseKey}`, "content-type": "application/json" },
+    method: "POST",
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  });
+  const data = await response.json() as { error?: string };
+  if (!response.ok) throw new Error(data.error ?? "Lease request failed");
   return data as T;
 }
 

@@ -54,7 +54,7 @@ enum Section {
 const SECTIONS: Section[] = [Section.Storage, Section.Security, Section.Behaviour, Section.Agents, Section.About];
 
 const BEHAVIOUR_KEYS: PreferenceKey[] = ["revealSeconds", "clipboardClearSeconds", "idleLockSeconds", "passwordLength", "passwordSymbols", "mouse"];
-const AGENT_KEYS: PreferenceKey[] = ["defaultLeaseTtl", "daemonTtlSeconds", "webPort", "webWithTui", "auditRetentionDays"];
+const AGENT_KEYS: PreferenceKey[] = ["defaultLeaseTtl", "saveLeaseKeys", "daemonTtlSeconds", "webPort", "webWithTui", "auditRetentionDays"];
 const UNIT_NAMES: Record<string, string> = { s: "Seconds", d: "Days" };
 
 /** The web UI the TUI serves alongside itself: its address, or why there is none. */
